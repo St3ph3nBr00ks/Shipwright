@@ -798,6 +798,21 @@ void SohMenu::AddMenuFlotilla() {
             "PickGazeTarget + ShouldRelaxLungeGates fire via the "
             "existing vanilla-hook path."));
 
+    AddWidget(path, "Max HP: combat-variant Skullwalltula spawn health##Flotilla",
+              WIDGET_CVAR_SLIDER_INT)
+        .CVar(CVAR_ENHANCEMENT("Skullwalltula.MaxHP"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(IntSliderOptions().Min(1).Max(20).DefaultValue(1).Tooltip(
+            "How many hits it takes to kill a combat-variant "
+            "Skullwalltula. Vanilla is 1 (one-shot with any weapon); "
+            "raise this to make them tankier.\n\n"
+            "Applies only to combat variants (params & 0xE000 == 0). "
+            "Gold-token variants keep their vanilla 2-HP.\n\n"
+            "Also acts as the HP ceiling for the Skulltula → "
+            "Skullwalltula swap carryover: a transforming Skulltula "
+            "brings its remaining HP with it, capped by this value."));
+
     AddWidget(path, "Skulltula (En_St) — chance to transform into Skullwalltula",
               WIDGET_SEPARATOR_TEXT);
 

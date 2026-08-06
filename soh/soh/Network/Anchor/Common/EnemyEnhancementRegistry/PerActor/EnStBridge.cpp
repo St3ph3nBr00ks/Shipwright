@@ -65,6 +65,26 @@ extern "C" {
 // (0.06) + floor-snap each frame (see EnStBridge.cpp file header).
 extern "C" void Anchor_Enhance_EnSw_MarkFromStSwap(EnSw* actor);
 
+// EnSw swap-transition arm helper — declared in EnSwBridge.cpp.
+// Sets per-actor state fields for the animated lerp from the En_St's
+// original ceiling position to the En_Sw's intended ground position.
+// The state machine's Tick reads these each frame while
+// stSwapTransitionActive == true and advances the actor at 60u/sec.
+extern "C" void Anchor_Enhance_EnSw_ArmSwapTransition(EnSw* actor,
+                                                        const Vec3f* sourcePos,
+                                                        const Vec3s* sourceRot,
+                                                        const Vec3f* targetPos,
+                                                        const Vec3s* targetRot);
+
+// EnSw HP carryover helper — declared in EnSwBridge.cpp (GH #210
+// Feature B, 2026-08-06). Writes newEnSw->colChkInfo.health =
+// min(sourceHealth, EnSwDescriptor::GetConfiguredMaxHP()). Gates on
+// IsInstanceEnhanced internally (combat variant only). No-op when
+// sourceHealth == 0.
+extern "C" void Anchor_Enhance_EnSw_ApplyCarryoverHealth(EnSw* actor,
+                                                          PlayState* play,
+                                                          uint8_t sourceHealth);
+
 namespace {
 
 // 2026-08-04 latest (log 849): CORRECTED variant understanding.
@@ -97,44 +117,147 @@ uint32_t GetEnStNetId(Actor* actor) {
 }
 
 // Actual swap execution. Host-only. Assumes eligibility already checked.
+//
+// 2026-08-05 (Phase 3 v3) — spawn at the En_St's exact position + rot,
+// then arm an animated lerp to the intended ground nav-node position.
+// This gives the swap a visible transition (spider "falls" from ceiling
+// to floor over ~1-2 seconds at 60u/sec) and prevents the state
+// machine's wall-attach paths from firing at spawn time (they can't
+// fire during the transition — state machine dispatch is suppressed
+// by TickStSwapTransition's early-return).
 void FireSwap(Actor* oldEnSt, PlayState* play, const char* triggerReason) {
     if (oldEnSt == nullptr || play == nullptr) return;
 
     const uint32_t oldNetId = GetEnStNetId(oldEnSt);
-    Vec3f spawnPos = oldEnSt->world.pos;
+    // Source pose = En_St's exact current position + rotation.
+    // The En_Sw will spawn here, then lerp to the target ground pos.
+    const Vec3f sourcePos = oldEnSt->world.pos;
+    const Vec3s sourceRot = oldEnSt->shape.rot;
+    // targetPos starts as the En_St pos; the raycast + nav-node
+    // search below refines it to the intended landing coordinate.
+    Vec3f spawnPos = sourcePos;
     const s16 spawnYaw = oldEnSt->shape.rot.y;
 
-    // 2026-08-04 (user) — find nearest floor node within 300u. Prior
-    // code snapped to actor.floorHeight which is the floor DIRECTLY
-    // below the actor — if the Skulltula dangles over a pit, that
-    // returns the pit floor (two levels below the intended arena).
-    // RoomNavData's floor-node graph knows about the actual walkable
-    // ground in the room; use that as the truth for the spawn coord.
-    constexpr float kMaxSpawnSearchXZ = 300.0f;
+    // 2026-08-05 (user) — establish a floor-Y reference via downward
+    // raycast BEFORE nav-node search. The raycast starts 10u ABOVE the
+    // En_St because the ceiling-Skulltula can clip into ground geometry
+    // during its LandOnGround animation; a raycast from body-center
+    // risks starting inside a floor poly and missing the surface
+    // entirely. This raycast establishes the intended landing altitude
+    // (deepest floor directly below), which then filters nav-node
+    // candidates via the Y-delta gate.
+    constexpr float kRaycastStartYOffset = 10.0f;
+    constexpr float kRaycastMaxDepth     = 3000.0f;
+    constexpr float kFloorNormalYMin     = 0.5f;  // matches wall/floor split threshold used elsewhere
+    Vec3f rayFrom = spawnPos;
+    rayFrom.y += kRaycastStartYOffset;
+    Vec3f rayTo = spawnPos;
+    rayTo.y -= kRaycastMaxDepth;
+    CollisionPoly* refFloorPoly = nullptr;
+    s32 refFloorBgId = 0;
+    Vec3f refFloorHit = {0.0f, 0.0f, 0.0f};
+    bool haveFloorRef = false;
+    Vec3f searchRef = spawnPos;
+    if (BgCheck_EntityLineTest1(&play->colCtx, &rayFrom, &rayTo,
+                                 &refFloorHit, &refFloorPoly,
+                                 /*chkWall*/ 0, /*chkFloor*/ 1,
+                                 /*chkCeil*/ 0, /*chkOneFace*/ 1,
+                                 &refFloorBgId) && refFloorPoly != nullptr) {
+        const float ny = COLPOLY_GET_NORMAL(refFloorPoly->normal.y);
+        if (ny > kFloorNormalYMin) {
+            searchRef.y = refFloorHit.y;
+            haveFloorRef = true;
+            SPDLOG_INFO("[EnStSwap] Downward raycast reference floor Y={:.0f} (from En_St Y={:.0f}, +{:.0f}u start offset)",
+                        refFloorHit.y, spawnPos.y, kRaycastStartYOffset);
+        }
+    }
+    if (!haveFloorRef) {
+        SPDLOG_INFO("[EnStSwap] Downward raycast missed floor — nav-node search reference falls back to En_St world.pos.y={:.0f}",
+                    spawnPos.y);
+    }
+
+    // 2026-08-05 (user) — nav-node search with Y-delta gate. Prior
+    // code used the default maxYDelta=1e9f which effectively disabled
+    // the Y filter, so a Deku Tree ceiling-Skulltula could pick a pit
+    // floor 200-400u below the intended arena because the pit's floor
+    // node had smaller XZ distance to the En_St's overhead position.
+    // Tight Y-delta around the raycast reference filters nav-node
+    // candidates to the walkable level Link would actually stand on.
+    constexpr float kMaxSpawnSearchXZ         = 300.0f;
+    constexpr float kMaxSpawnSearchYWithRef   = 100.0f;
+    constexpr float kMaxSpawnSearchYFallback  = 300.0f;  // wider when raycast missed
+    const float maxYDelta = haveFloorRef ? kMaxSpawnSearchYWithRef
+                                         : kMaxSpawnSearchYFallback;
     const AnchorNavRoom::RoomNavData* navData =
         AnchorNavRoom::GetForRoom(gPlayState->sceneNum,
                                     (int8_t)gPlayState->roomCtx.curRoom.num);
     if (navData != nullptr) {
         const int nodeIdx = AnchorNavRoom::FindNearestFloorNodeXZRadius(
-            navData, spawnPos, kMaxSpawnSearchXZ);
+            navData, searchRef, kMaxSpawnSearchXZ, maxYDelta);
         if (nodeIdx >= 0) {
             const Vec3f oldSpawn = spawnPos;
             spawnPos = navData->nodes[nodeIdx].pos;
-            SPDLOG_INFO("[EnStSwap] Nav-node spawn adjust: ({:.0f},{:.0f},{:.0f}) -> ({:.0f},{:.0f},{:.0f}) (nearest floor node within {:.0f}u)",
+            SPDLOG_INFO("[EnStSwap] Nav-node spawn adjust: ({:.0f},{:.0f},{:.0f}) -> ({:.0f},{:.0f},{:.0f}) (searchRefY={:.0f} XZ<={:.0f}u |dY|<={:.0f}u)",
                         oldSpawn.x, oldSpawn.y, oldSpawn.z,
-                        spawnPos.x, spawnPos.y, spawnPos.z, kMaxSpawnSearchXZ);
+                        spawnPos.x, spawnPos.y, spawnPos.z,
+                        searchRef.y, kMaxSpawnSearchXZ, maxYDelta);
+        } else if (haveFloorRef) {
+            // No nav node matches the tight window — fall back to the
+            // raycast-hit floor Y so we at least land on real geometry
+            // rather than the En_St's overhead position.
+            spawnPos.y = searchRef.y;
+            SPDLOG_INFO("[EnStSwap] No floor node within XZ<={:.0f}u |dY|<={:.0f}u — falling back to raycast floor Y={:.0f}",
+                        kMaxSpawnSearchXZ, maxYDelta, searchRef.y);
         } else {
-            SPDLOG_INFO("[EnStSwap] No floor node within {:.0f}u — using En_St world.pos as-is",
-                        kMaxSpawnSearchXZ);
+            SPDLOG_INFO("[EnStSwap] No floor node within XZ<={:.0f}u |dY|<={:.0f}u AND raycast missed — using En_St world.pos as-is",
+                        kMaxSpawnSearchXZ, maxYDelta);
         }
+    } else if (haveFloorRef) {
+        // No nav data for this room, but the downward raycast found a
+        // real floor — use its Y so we don't spawn floating in midair.
+        spawnPos.y = searchRef.y;
+        SPDLOG_INFO("[EnStSwap] RoomNavData unavailable for scene {}/{} — using raycast floor Y={:.0f}",
+                    gPlayState->sceneNum, gPlayState->roomCtx.curRoom.num,
+                    searchRef.y);
     } else {
-        SPDLOG_INFO("[EnStSwap] RoomNavData unavailable for scene {}/{} — using En_St world.pos as-is",
+        SPDLOG_INFO("[EnStSwap] RoomNavData unavailable for scene {}/{} AND raycast missed — using En_St world.pos as-is",
                     gPlayState->sceneNum, gPlayState->roomCtx.curRoom.num);
     }
 
-    SPDLOG_INFO("[EnStSwap] Firing En_St→En_Sw swap — trigger={} oldNetId={} pos=({:.0f},{:.0f},{:.0f})",
+    // Target rotation for the lerp landing pose. Ground orientation
+    // matches TickGroundPursue idle: pitch = -0x4000 (dorsal-up,
+    // skull-forward), yaw preserved from source (spider ends facing
+    // the same direction the ceiling Skulltula was), roll = 0.
+    const Vec3s targetRot = {(s16)-0x4000, spawnYaw, 0};
+
+    SPDLOG_INFO("[EnStSwap] Firing En_St→En_Sw swap — trigger={} oldNetId={} "
+                "source=({:.0f},{:.0f},{:.0f}) target=({:.0f},{:.0f},{:.0f})",
                 triggerReason, oldNetId,
+                sourcePos.x, sourcePos.y, sourcePos.z,
                 spawnPos.x, spawnPos.y, spawnPos.z);
+
+    // 2026-08-05 (Phase 3 v3) — spawn the En_Sw AT THE SOURCE (En_St's
+    // position) rather than at the target ground position. The animated
+    // transition (armed below) then lerps from source to target at
+    // 60u/sec. Peers see the transition too because the wire spawn
+    // carries source pos; if we ever want peers to also see the lerp
+    // they'd need a separate wire signal for the target — TODO for a
+    // follow-up if the visual mismatch matters. For v1 the peer just
+    // sees the En_Sw appear at source and immediately be there (since
+    // peer's local ENEMY_UPDATE from host will drive its position via
+    // the sync pipeline).
+    //
+    // GH #210 Feature B (2026-08-06) — snapshot the En_St's current HP
+    // BEFORE Actor_Spawn / KillNetworkActorSilently touch it. This
+    // value flows through to Anchor_Enhance_EnSw_ApplyCarryoverHealth
+    // below. Two trigger scenarios both leave the value meaningful:
+    //   OnHitDuringDescent — called from z_en_st.c:517 BEFORE
+    //     Actor_ApplyDamage runs, so this reads the pre-hit HP
+    //     (which is what the user intends to carry over).
+    //   OnGroundImpact — called from z_en_st.c:965 during a
+    //     non-damage transition (LandOnGround → WaitOnGround), so
+    //     the HP is whatever it was after any prior hits.
+    const uint8_t sourceHealth = oldEnSt->colChkInfo.health;
 
     // Bracket the spawn with pendingReplacesNetId so the outgoing
     // ENEMY_SPAWN broadcast carries the field. HookHandlers consumes
@@ -142,8 +265,10 @@ void FireSwap(Actor* oldEnSt, PlayState* play, const char* triggerReason) {
     Anchor::Instance->pendingReplacesNetId = oldNetId;
     Actor* newEnSw = Actor_Spawn(&play->actorCtx, play,
                                   ACTOR_EN_SW,
-                                  spawnPos.x, spawnPos.y, spawnPos.z,
-                                  /*rot.x=*/0, /*rot.y=*/spawnYaw, /*rot.z=*/0,
+                                  sourcePos.x, sourcePos.y, sourcePos.z,
+                                  /*rot.x=*/sourceRot.x,
+                                  /*rot.y=*/sourceRot.y,
+                                  /*rot.z=*/sourceRot.z,
                                   kEnSwCombatParams);
     // Defensive clear in case OnActorSpawn didn't fire (Actor_Spawn
     // returned null — actor limit or invalid id).
@@ -162,6 +287,27 @@ void FireSwap(Actor* oldEnSt, PlayState* play, const char* triggerReason) {
     // sits on the ground instead of dangling in midair looking for
     // a wall to cling to.
     Anchor_Enhance_EnSw_MarkFromStSwap((EnSw*)newEnSw);
+
+    // 2026-08-05 (Phase 3 v3) — arm the animated transition from
+    // source (En_St's pos + rot) to target (ground nav-node + ground
+    // orientation). State machine's Tick advances the actor at
+    // 60u/sec and lerps rotation to match; when arrival threshold is
+    // crossed, transition state becomes GroundPursue and normal state
+    // machine dispatch takes over.
+    Anchor_Enhance_EnSw_ArmSwapTransition((EnSw*)newEnSw,
+                                            &sourcePos, &sourceRot,
+                                            &spawnPos, &targetRot);
+
+    // GH #210 Feature B (2026-08-06) — carry over the En_St's HP into
+    // the new En_Sw. Applied after Anchor_Enhance_EnSw_OnInit already
+    // ran during Actor_Spawn (which set health to the CVar-configured
+    // max via Feature A). This call overrides that with the
+    // min(sourceHealth, MaxHP) carryover so a partial-HP En_St swap
+    // preserves damage taken. Runs on host; peer replicas converge via
+    // the next ENEMY_UPDATE tick which carries host-authoritative HP.
+    SPDLOG_INFO("[EnStSwap] Carryover source En_St HP={} → applying to new En_Sw netId={} (cap = MaxHP CVar)",
+                (int)sourceHealth, oldNetId);
+    Anchor_Enhance_EnSw_ApplyCarryoverHealth((EnSw*)newEnSw, play, sourceHealth);
 
     // Silently kill the old En_St on host. Peer already handled its own
     // kill in HandlePacket_EnemySpawn via replacesNetId when the SPAWN

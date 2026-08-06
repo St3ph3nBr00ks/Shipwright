@@ -88,6 +88,23 @@ struct EnSwEnhancedState {
     // Init's wall-cling attempts don't leave the actor dangling.
     bool spawnedFromStSwap = false;
 
+    // 2026-08-05 (Pillar 5 Phase 3 v3) — animated swap transition.
+    // ArmSwapTransition sets these fields + stSwapTransitionActive=true;
+    // per-tick handler lerps world.pos + world.rot from source to
+    // target at kStSwapLerpSpeedPerSec (60u/second). During transition,
+    // vanilla actionFunc is re-armed to ambient each tick (prevents
+    // vanilla lunge), state machine dispatch is skipped (prevents
+    // wall-attach oscillation from opportunistic_climb_attach /
+    // wall_ahead detection), and state stays at GroundPursue. When the
+    // actor arrives at target, stSwapTransitionActive clears and the
+    // normal state machine takes over. Cancelled if actor dies mid-
+    // transition (vanilla death sequence takes precedence).
+    bool  stSwapTransitionActive = false;
+    Vec3f stSwapSourcePos        = {0.0f, 0.0f, 0.0f};
+    Vec3f stSwapTargetPos        = {0.0f, 0.0f, 0.0f};
+    Vec3s stSwapSourceRot        = {0, 0, 0};
+    Vec3s stSwapTargetRot        = {0, 0, 0};
+
     // Wall basis established via TickUninitialized's raycast. Reused
     // by TickWallIdle / TickWallPursue for rotation rebuild + tangent-
     // plane motion. Recomputed on GroundToWallReattach for new walls.
@@ -235,5 +252,17 @@ bool EnSw_EnhancedStateMachine_IsWalkAnimActive(EnSw* self);
 // actor lands on the ground instead of dangling in midair looking
 // for a wall to cling to.
 void EnSw_EnhancedStateMachine_MarkFromStSwap(EnSw* self);
+
+// 2026-08-05 (Pillar 5 Phase 3 v3, GH #210) — arm the animated
+// transition from source→target position/rotation. Called from
+// EnStBridge FireSwap after MarkFromStSwap + Actor_Spawn(EN_SW) at
+// the source (ceiling-Skulltula) position. Per-tick handler lerps
+// world.pos + world.rot at kStSwapLerpSpeedPerSec (60u/second) until
+// arrival, then hands off to normal state machine dispatch.
+void EnSw_EnhancedStateMachine_ArmSwapTransition(EnSw* self,
+                                                   const Vec3f& sourcePos,
+                                                   const Vec3s& sourceRot,
+                                                   const Vec3f& targetPos,
+                                                   const Vec3s& targetRot);
 
 }  // namespace AnchorEnemyEnhancement

@@ -70,6 +70,17 @@ bool EnSwDescriptor::IsInstanceEnhanced(Actor* actor, PlayState* play) {
     return variant == 0;
 }
 
+int EnSwDescriptor::GetConfiguredMaxHP() const {
+    // Reader clamp: 1 = still alive; 127 = fits s8 netHealth cache used
+    // for MP sync (see session_state.md "EnemyNetId struct" — netHealth
+    // is s8). Widening the cache would violate YAGNI for the values
+    // this CVar is intended to expose (spider is meant to be 2-5 HP).
+    const int raw = AnchorCVarSync::GetEnforcedInt(MaxHPCVar(), 1);
+    if (raw < 1)   return 1;
+    if (raw > 127) return 127;
+    return raw;
+}
+
 void EnSwDescriptor::OnNavTick(Actor* actor, PlayState* play) {
     if (!IsInstanceEnhanced(actor, play)) return;
 

@@ -2085,6 +2085,121 @@ void TickPlaceholder(EnSw* self, PlayState* play, EnSwEnhancedState& s,
     }
 }
 
+// -------------------------------------------------------------------
+// 2026-08-05 (Pillar 5 Phase 3 v3) — En_St→En_Sw swap transition
+// -------------------------------------------------------------------
+// Runs while `s.stSwapTransitionActive == true`. Owns pos + rot fully;
+// re-arms vanilla actionFunc to ambient each tick so vanilla lunge/
+// wall-attach can't fire mid-transition. On arrival, clears the flag,
+// snaps pos/rot to target, transitions state to GroundPursue.
+//
+// Speed constant is 60u/second per user spec 2026-08-05. Rotation
+// interpolates linearly with position progress (arrives simultaneously).
+// Yaw uses signed shortest-arc delta so wrapping around 0x8000 → -0x8000
+// takes the natural direction.
+constexpr float kStSwapLerpSpeedPerSec = 60.0f;
+
+// Signed shortest-arc delta between two s16 yaws (range -0x8000 .. +0x7FFF).
+inline s16 ShortestArcDelta(s16 from, s16 to) {
+    // The delta as s16 wraps automatically — 0x8000+ becomes negative.
+    return (s16)(to - from);
+}
+
+void TickStSwapTransition(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
+    (void)play;
+
+    // Enforce scale during transition too — vanilla En_Sw's Init sets
+    // scale = 0.02 (line 280 in z_en_sw.c). Without this, the spider
+    // would appear at vanilla En_Sw size during the lerp rather than
+    // the 3× En_St BIG size that visual continuity requires.
+    if (s.spawnedFromStSwap) {
+        Actor_SetScale(&self->actor, 0.06f);
+    }
+
+    // Compute distance remaining to target.
+    const Vec3f cur = self->actor.world.pos;
+    const Vec3f delta = {
+        s.stSwapTargetPos.x - cur.x,
+        s.stSwapTargetPos.y - cur.y,
+        s.stSwapTargetPos.z - cur.z,
+    };
+    const float distRemaining =
+        std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+
+    // Convert 60u/sec to per-tick step using the framerate-aware helper.
+    // MsToGameTicks(1000) returns the number of ticks that elapse per
+    // second at the current sampled tick rate.
+    const int ticksPerSec = Anchor::Instance->MsToGameTicks(1000);
+    const float speedPerTick =
+        (ticksPerSec > 0) ? (kStSwapLerpSpeedPerSec / (float)ticksPerSec)
+                          : 3.0f;  // fallback ~20fps
+
+    // Neutralise any vanilla side effects from actionFunc — keep vanilla
+    // in ambient with a fresh unk_442 arm so its own state machine
+    // can't advance to lunge / wall-attach during the transition.
+    EnSw_ForceAmbient(self);
+    // Also zero velocity so vanilla's actionFunc physics can't shove
+    // the actor off our lerp target.
+    self->actor.velocity.x = 0.0f;
+    self->actor.velocity.y = 0.0f;
+    self->actor.velocity.z = 0.0f;
+
+    // Arrival check — snap to target and hand off to GroundPursue.
+    if (distRemaining <= speedPerTick + 0.01f) {
+        self->actor.world.pos = s.stSwapTargetPos;
+        self->actor.world.rot = s.stSwapTargetRot;
+        self->actor.shape.rot = self->actor.world.rot;
+        s.stSwapTransitionActive = false;
+        // The spider is now at the intended ground position with ground
+        // orientation. Transition state so the next tick's normal
+        // dispatch enters TickGroundPursue immediately.
+        TransitionTo(self, s, EnSwState::GroundPursue,
+                     "st_swap_transition_complete");
+        SPDLOG_INFO("[EnStSwap] Transition complete — actor at target "
+                    "pos=({:.0f},{:.0f},{:.0f})",
+                    self->actor.world.pos.x, self->actor.world.pos.y,
+                    self->actor.world.pos.z);
+        return;
+    }
+
+    // Move toward target by one tick's step.
+    const float invDist = 1.0f / distRemaining;
+    self->actor.world.pos.x += delta.x * invDist * speedPerTick;
+    self->actor.world.pos.y += delta.y * invDist * speedPerTick;
+    self->actor.world.pos.z += delta.z * invDist * speedPerTick;
+
+    // Rotation lerp — parameterise by fraction of total distance
+    // traveled so rotation and position arrive simultaneously.
+    const Vec3f totalDelta = {
+        s.stSwapTargetPos.x - s.stSwapSourcePos.x,
+        s.stSwapTargetPos.y - s.stSwapSourcePos.y,
+        s.stSwapTargetPos.z - s.stSwapSourcePos.z,
+    };
+    const float totalDist =
+        std::sqrt(totalDelta.x * totalDelta.x +
+                  totalDelta.y * totalDelta.y +
+                  totalDelta.z * totalDelta.z);
+    const float progress =
+        (totalDist > 0.001f) ? (1.0f - (distRemaining / totalDist))
+                             : 1.0f;
+
+    // Interpolate each axis. Yaw uses signed shortest arc so wraparound
+    // is smooth; pitch and roll are direct linear.
+    const s16 arcX =
+        ShortestArcDelta(s.stSwapSourceRot.x, s.stSwapTargetRot.x);
+    const s16 arcY =
+        ShortestArcDelta(s.stSwapSourceRot.y, s.stSwapTargetRot.y);
+    const s16 arcZ =
+        ShortestArcDelta(s.stSwapSourceRot.z, s.stSwapTargetRot.z);
+    self->actor.world.rot.x =
+        (s16)(s.stSwapSourceRot.x + (s16)(arcX * progress));
+    self->actor.world.rot.y =
+        (s16)(s.stSwapSourceRot.y + (s16)(arcY * progress));
+    self->actor.world.rot.z =
+        (s16)(s.stSwapSourceRot.z + (s16)(arcZ * progress));
+    self->actor.shape.rot = self->actor.world.rot;
+}
+
 }  // namespace
 
 // -------------------------------------------------------------------
@@ -2107,17 +2222,82 @@ void EnSw_EnhancedStateMachine_Tick(EnSw* self, PlayState* play) {
     // has no wall backing), the actor hangs in midair. Force
     // world.pos.y to floorHeight so gravity + ground-walking mode
     // (via NavConsume descriptor) take over.
+    // 2026-08-05 (Bug #2 fix) — bail out entirely when actor is dying.
+    // Vanilla combat En_Sw death sequence is:
+    //   damage → func_80B0DB00 (fall with gravity + Actor_UpdateBgCheckInfo)
+    //          → landing (bgCheckFlags & 1) → func_80B0DC7C (dust ring
+    //          for 10 ticks) → Item_DropCollectibleRandom + Actor_Kill
+    // If the spawnedFromStSwap floor snap runs during func_80B0DB00 it
+    // zeros velocity.y each tick — the spider can never fall, never
+    // triggers landing, never advances to func_80B0DC7C, never dies.
+    // The yield-check then keeps state pinned in LungeYield for 300
+    // frames until the safety timeout fires ForceAmbient → actor
+    // "resets" to alive-ambient with health=0, colliders disabled.
+    // Skipping all state-machine work when dying lets vanilla drive
+    // the death sequence unimpeded.
+    if (self->actor.colChkInfo.health <= 0) {
+        return;
+    }
+
+    // 2026-08-05 (Bug #3 fix) — animated swap transition. When active,
+    // this handler owns pos + rot writes fully; vanilla actionFunc's
+    // side effects are neutralised by re-arming ambient each tick,
+    // and state-machine dispatch is skipped so wall-attach paths
+    // (opportunistic_climb_attach, wall_ahead) can't fire during the
+    // brief transition window. When arrived at target, hands off to
+    // normal state machine at GroundPursue.
+    if (s.stSwapTransitionActive) {
+        TickStSwapTransition(self, play, s);
+        return;
+    }
+
     if (s.spawnedFromStSwap) {
+        // Enforce scale FIRST so BodySurfaceOffsetFor returns the
+        // correct scaled offset for the floor-snap math below.
         Actor_SetScale(&self->actor, 0.06f);
-        // Floor snap: only when we have a valid floor reading (≠ sentinel).
-        // Snap DOWN if actor is above floor by any margin — keeps the
-        // spider grounded even if vanilla's per-tick physics tried to
-        // lift it.
-        if (self->actor.floorHeight > BGCHECK_Y_MIN &&
-            self->actor.world.pos.y > self->actor.floorHeight) {
-            self->actor.world.pos.y = self->actor.floorHeight;
-            self->actor.velocity.y = 0.0f;
+
+        // 2026-08-05 — raycast-based floor snap. Previous code gated
+        // on `actor.floorHeight > BGCHECK_Y_MIN` but vanilla combat
+        // En_Sw's actionFunc chain (`func_80B0E5E0` etc.) never calls
+        // `Actor_UpdateBgCheckInfo`, so `floorHeight` stays at
+        // BGCHECK_Y_MIN sentinel forever → gate always false → floor
+        // snap never fired → actor stayed at spawn Y (nav-node floor
+        // poly Y with no body offset added, "clipped into floor").
+        // Additionally, without this snap the actor was vulnerable
+        // to vanilla `func_80B0E5E0` advancing actionFunc to lunge on
+        // the first tick (target detected + `unk_442`==0), which
+        // triggers our yield-check → LungeYield → TickGroundPursue's
+        // own floor-snap never gets a chance to run. Doing the snap
+        // here (before the yield-check) ensures floor placement even
+        // in the yield-early-return path.
+        //
+        // Raycast starts 10u above actor to avoid starting inside
+        // floor geometry (same trick as EnStBridge's ceiling raycast
+        // reference).
+        {
+            constexpr float kSnapProbeAbove = 10.0f;
+            constexpr float kSnapProbeDepth = 200.0f;
+            Vec3f rayFrom = self->actor.world.pos;
+            rayFrom.y += kSnapProbeAbove;
+            Vec3f rayTo = self->actor.world.pos;
+            rayTo.y -= kSnapProbeDepth;
+            CollisionPoly* poly = nullptr;
+            s32 bgId = 0;
+            Vec3f hit = {0.0f, 0.0f, 0.0f};
+            if (BgCheck_EntityLineTest1(&play->colCtx, &rayFrom, &rayTo,
+                                         &hit, &poly, /*chkWall*/ 0,
+                                         /*chkFloor*/ 1, /*chkCeil*/ 0,
+                                         /*chkOneFace*/ 1, &bgId) &&
+                poly != nullptr) {
+                const float ny = COLPOLY_GET_NORMAL(poly->normal.y);
+                if (ny > kWallNormalYThreshold) {
+                    self->actor.world.pos.y =
+                        hit.y + BodySurfaceOffsetFor(self);
+                    self->actor.velocity.y = 0.0f;
+                }
+            }
         }
+
         // 2026-08-04 (user "still spawned in wall-climbing state") —
         // force into GroundPursue on first tick. Vanilla En_Sw Init
         // + TickUninitialized both try to find a wall to cling to;
@@ -2355,12 +2535,64 @@ bool EnSw_EnhancedStateMachine_IsWalkAnimActive(EnSw* self) {
 // 2026-08-04 (Pillar 5 Phase 3) — mark as spawned via En_St→En_Sw
 // swap. GetOrCreate ensures the state block exists before the flag
 // is set (the En_Sw's own Tick call may not have run yet at this point).
+//
+// 2026-08-05 addendum — also force vanilla actionFunc back to
+// ambient (func_80B0E5E0) via EnSw_ForceAmbient. Vanilla En_Sw's
+// Init leaves `unk_442 = 0`, so the very first call to func_80B0E5E0
+// hits `DECR(unk_442) == 0` AND `func_80B0DEA8()` returns true when
+// a target is nearby (which it IS for a swap — the swap only fires
+// when Link is close). That advances actionFunc to func_80B0E728
+// (lunge) BEFORE our post-tick runs. Our tick's yield-check then
+// sees actionFunc != ambient-snapshot → transitions state to
+// LungeYield and early-returns before TickGroundPursue can apply
+// its floor snap. EnSw_ForceAmbient re-arms `unk_442 = 30`, so
+// vanilla can't lunge for the first 30 ticks — enough time for the
+// state machine to properly establish GroundPursue + floor-snap +
+// scale on subsequent frames.
 void EnSw_EnhancedStateMachine_MarkFromStSwap(EnSw* self) {
     if (self == nullptr) return;
     auto& s = GetOrCreate(self);
     s.spawnedFromStSwap = true;
-    SPDLOG_INFO("[EnStSwap] Marked En_Sw as spawned-from-St-swap actor={}",
+    EnSw_ForceAmbient(self);
+    SPDLOG_INFO("[EnStSwap] Marked En_Sw as spawned-from-St-swap actor={} (forced ambient actionFunc + unk_442 arm)",
                 (void*)&self->actor);
+}
+
+// 2026-08-05 (Pillar 5 Phase 3 v3) — arm the animated transition
+// from source→target. Caller (EnStBridge FireSwap) has already spawned
+// the En_Sw at the source position; this stores endpoints on the state
+// block + sets stSwapTransitionActive so the per-tick handler takes over.
+// Also transitions state to GroundPursue immediately so downstream logic
+// (once transition completes) doesn't have to do a wall-attach probe.
+void EnSw_EnhancedStateMachine_ArmSwapTransition(EnSw* self,
+                                                   const Vec3f& sourcePos,
+                                                   const Vec3s& sourceRot,
+                                                   const Vec3f& targetPos,
+                                                   const Vec3s& targetRot) {
+    if (self == nullptr) return;
+    auto& s = GetOrCreate(self);
+    s.stSwapTransitionActive = true;
+    s.stSwapSourcePos = sourcePos;
+    s.stSwapTargetPos = targetPos;
+    s.stSwapSourceRot = sourceRot;
+    s.stSwapTargetRot = targetRot;
+    // Ensure spider starts at source (defensive — caller should have
+    // already spawned there, but writing here guarantees the invariant
+    // if the caller ever forgets to align spawn coord with source).
+    self->actor.world.pos = sourcePos;
+    self->actor.world.rot = sourceRot;
+    self->actor.shape.rot = sourceRot;
+    // State stays at whatever it was (typically Uninitialized just
+    // after spawn). When TickStSwapTransition completes, it calls
+    // TransitionTo(GroundPursue) which resets framesInState to 0.
+    SPDLOG_INFO("[EnStSwap] Armed swap transition actor={} "
+                "source=({:.0f},{:.0f},{:.0f}) target=({:.0f},{:.0f},{:.0f}) "
+                "sourceRot=(0x{:x},0x{:x},0x{:x}) targetRot=(0x{:x},0x{:x},0x{:x})",
+                (void*)&self->actor,
+                sourcePos.x, sourcePos.y, sourcePos.z,
+                targetPos.x, targetPos.y, targetPos.z,
+                (uint16_t)sourceRot.x, (uint16_t)sourceRot.y, (uint16_t)sourceRot.z,
+                (uint16_t)targetRot.x, (uint16_t)targetRot.y, (uint16_t)targetRot.z);
 }
 
 }  // namespace AnchorEnemyEnhancement

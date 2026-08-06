@@ -190,6 +190,14 @@ const std::vector<IntCVarEntry> kEnforcedInts = {
     { CVAR_ENHANCEMENT("Skullwalltula.GravityAware"),      0 },
     { CVAR_ENHANCEMENT("Skullwalltula.AggressiveAcquire"), 0 },
 
+    // Combat-variant max HP (default 1 = vanilla one-shot). Range 1-20
+    // exposed via slider; clamped 1-127 at the reader to fit the s8
+    // netHealth cache used for MP sync. Gold-token variants (params &
+    // 0xE000 non-zero) ignore this — they stay at vanilla HP via the
+    // descriptor's IsInstanceEnhanced gate. Also acts as the ceiling
+    // for Skulltula → Skullwalltula HP carryover (see FireSwap).
+    { CVAR_ENHANCEMENT("Skullwalltula.MaxHP"),             1 },
+
     // --- Pillar 5 Phase 3 — Skulltula → Skullwalltula swap (GH #210) ---
     // Host-authoritative. When a ceiling Skulltula (En_St) descends
     // toward the ground, it may transform into a Skullwalltula (En_Sw)

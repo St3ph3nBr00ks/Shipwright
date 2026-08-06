@@ -23,6 +23,7 @@
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/GravityAdapter.h"
 #include "soh/Network/Anchor/Common/EnforcedCVars.h"  // AnchorCVarSync::GetEnforcedInt
 
+#include <algorithm>  // std::min for carryover clamp
 #include <unordered_map>
 
 namespace {
@@ -65,6 +66,16 @@ extern "C" void Anchor_Enhance_EnSw_OnInit(EnSw* actor, PlayState* play) {
     // captured regardless of CVar state so it's available if the CVar
     // toggles on mid-session. Idempotent — repeat calls are no-ops.
     AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_SnapshotAmbient(actor);
+
+    // GH #210 Feature A (2026-08-06) — configurable max HP for combat
+    // variant. Overrides vanilla's health=1 (from D_80B0F074 at
+    // z_en_sw.c:85) after CollisionCheck_SetInfo2 + the gold-token
+    // switch have run. IsInstanceEnhanced above already filtered
+    // gold-token variants — safe to write unconditionally here.
+    // Default CVar value = 1 (vanilla-preserving); this write is a
+    // no-op in that case.
+    const int maxHP = desc->GetConfiguredMaxHP();
+    actor->actor.colChkInfo.health = (u8)maxHP;
 }
 
 extern "C" void Anchor_Enhance_EnSw_Tick(EnSw* actor, PlayState* play) {
@@ -180,4 +191,56 @@ extern "C" int Anchor_Enhance_EnSw_ShouldRelaxLungeGates(EnSw* actor) {
 extern "C" void Anchor_Enhance_EnSw_MarkFromStSwap(EnSw* actor) {
     if (actor == nullptr) return;
     AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_MarkFromStSwap(actor);
+}
+
+// 2026-08-05 (Pillar 5 Phase 3 v3, GH #210) — arm the animated
+// transition from source→target position/rotation. Called by
+// EnStBridge FireSwap after MarkFromStSwap. Vec3f/Vec3s pass by
+// pointer to match project convention for extern "C" struct params
+// (see Anchor_ComputeBladeWorldFromMatrix in SwordBladeTracking.cpp).
+extern "C" void Anchor_Enhance_EnSw_ArmSwapTransition(EnSw* actor,
+                                                        const Vec3f* sourcePos,
+                                                        const Vec3s* sourceRot,
+                                                        const Vec3f* targetPos,
+                                                        const Vec3s* targetRot) {
+    if (actor == nullptr || sourcePos == nullptr || sourceRot == nullptr ||
+        targetPos == nullptr || targetRot == nullptr) return;
+    AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_ArmSwapTransition(
+        actor, *sourcePos, *sourceRot, *targetPos, *targetRot);
+}
+
+// GH #210 Feature B (2026-08-06) — apply the En_St → En_Sw swap
+// carryover HP. Called from EnStBridge FireSwap right after
+// Actor_Spawn(EN_SW) returns and after ArmSwapTransition. Host-only
+// in practice (FireSwap runs on host only) but the write is safe on
+// any client; peer replicas will be overwritten by the next
+// ENEMY_UPDATE tick from host regardless.
+//
+// sourceHealth = the En_St's colChkInfo.health at swap trigger time.
+// For OnHitDuringDescent this is the PRE-hit value (see z_en_st.c:517
+// call site — the hook returns before Actor_ApplyDamage runs). For
+// OnGroundImpact the En_St isn't taking damage so it's the current
+// value.
+//
+// Applied HP = min(sourceHealth, configured MaxHP). Cap ensures the
+// new Skullwalltula never exceeds its own max — user tuning the
+// MaxHP CVar upward simultaneously raises the carryover ceiling.
+//
+// If sourceHealth is 0 (shouldn't happen — swap-firing En_St is
+// still alive), we skip the write so the En_Sw keeps its Init
+// value (which itself will be >=1 via Feature A's clamp).
+extern "C" void Anchor_Enhance_EnSw_ApplyCarryoverHealth(EnSw* actor,
+                                                          PlayState* play,
+                                                          uint8_t sourceHealth) {
+    if (actor == nullptr) return;
+    if (sourceHealth == 0) return;
+    auto* desc = GetEnSwDescriptor();
+    if (desc == nullptr) return;
+    if (!desc->IsInstanceEnhanced(&actor->actor, play)) return;
+
+    const int maxHP = desc->GetConfiguredMaxHP();
+    const int applied = std::min<int>((int)sourceHealth, maxHP);
+    actor->actor.colChkInfo.health = (u8)applied;
+    SPDLOG_INFO("[EnSwCarryover] Applied HP={} (source={} cap={})",
+                applied, (int)sourceHealth, maxHP);
 }
