@@ -190,13 +190,20 @@ const std::vector<IntCVarEntry> kEnforcedInts = {
     { CVAR_ENHANCEMENT("Skullwalltula.GravityAware"),      0 },
     { CVAR_ENHANCEMENT("Skullwalltula.AggressiveAcquire"), 0 },
 
-    // Combat-variant max HP (default 1 = vanilla one-shot). Range 1-20
-    // exposed via slider; clamped 1-127 at the reader to fit the s8
-    // netHealth cache used for MP sync. Gold-token variants (params &
-    // 0xE000 non-zero) ignore this — they stay at vanilla HP via the
-    // descriptor's IsInstanceEnhanced gate. Also acts as the ceiling
-    // for Skulltula → Skullwalltula HP carryover (see FireSwap).
-    { CVAR_ENHANCEMENT("Skullwalltula.MaxHP"),             1 },
+    // Swap-spawned Skullwalltula HP cap. Scope-narrow: applies ONLY
+    // to En_Sw actors that spawn as the result of a Skulltula
+    // (En_St) → Skullwalltula (En_Sw) swap in FireSwap. Vanilla-
+    // spawned En_Sw retain their vanilla HP (default 1 for combat,
+    // 2 for gold-token, plus any modifications from other SoH
+    // enhancements like DamageMult / HyperEnemies).
+    //
+    // The carryover writes newEnSw->colChkInfo.health =
+    // min(oldEnSt->colChkInfo.health, SwapMaxHP). Default 2 matches
+    // vanilla En_St base HP so a full-HP swap yields a 2-HP En_Sw
+    // "for free" (no user opt-in needed to fix the 2→1 HP loss bug).
+    // Range 1-20 exposed via slider; reader clamps 1-127 to fit the
+    // s8 netHealth MP-sync cache.
+    { CVAR_ENHANCEMENT("Skullwalltula.SwapMaxHP"),         2 },
 
     // --- Pillar 5 Phase 3 — Skulltula → Skullwalltula swap (GH #210) ---
     // Host-authoritative. When a ceiling Skulltula (En_St) descends

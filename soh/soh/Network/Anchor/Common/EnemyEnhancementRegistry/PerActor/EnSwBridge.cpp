@@ -67,15 +67,16 @@ extern "C" void Anchor_Enhance_EnSw_OnInit(EnSw* actor, PlayState* play) {
     // toggles on mid-session. Idempotent — repeat calls are no-ops.
     AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_SnapshotAmbient(actor);
 
-    // GH #210 Feature A (2026-08-06) — configurable max HP for combat
-    // variant. Overrides vanilla's health=1 (from D_80B0F074 at
-    // z_en_sw.c:85) after CollisionCheck_SetInfo2 + the gold-token
-    // switch have run. IsInstanceEnhanced above already filtered
-    // gold-token variants — safe to write unconditionally here.
-    // Default CVar value = 1 (vanilla-preserving); this write is a
-    // no-op in that case.
-    const int maxHP = desc->GetConfiguredMaxHP();
-    actor->actor.colChkInfo.health = (u8)maxHP;
+    // 2026-08-06 rescope: HP is NOT overridden here. Vanilla En_Sw
+    // (whether scene-placed, director-spawned, or otherwise NOT from
+    // an En_St swap) keeps its vanilla `colChkInfo.health` value —
+    // 1 for combat variant, 2 for gold-token (both from vanilla's
+    // D_80B0F074 + gold-token switch at z_en_sw.c:279-322), plus
+    // whatever other SoH enhancements apply. Swap-spawned En_Sw
+    // get their HP written LATER by
+    // Anchor_Enhance_EnSw_ApplyCarryoverHealth (called from
+    // EnStBridge FireSwap), which is the only site where the
+    // configurable SwapMaxHP CVar is consulted.
 }
 
 extern "C" void Anchor_Enhance_EnSw_Tick(EnSw* actor, PlayState* play) {
@@ -209,12 +210,16 @@ extern "C" void Anchor_Enhance_EnSw_ArmSwapTransition(EnSw* actor,
         actor, *sourcePos, *sourceRot, *targetPos, *targetRot);
 }
 
-// GH #210 Feature B (2026-08-06) — apply the En_St → En_Sw swap
-// carryover HP. Called from EnStBridge FireSwap right after
-// Actor_Spawn(EN_SW) returns and after ArmSwapTransition. Host-only
-// in practice (FireSwap runs on host only) but the write is safe on
-// any client; peer replicas will be overwritten by the next
-// ENEMY_UPDATE tick from host regardless.
+// GH #210 (2026-08-06) — apply the En_St → En_Sw swap carryover HP.
+// This is the ONLY site that reads the SwapMaxHP CVar and the ONLY
+// site that overrides vanilla En_Sw HP init. Non-swap En_Sw (scene-
+// placed, director-spawned, etc.) never reach this function.
+//
+// Called from EnStBridge FireSwap right after Actor_Spawn(EN_SW)
+// returns and after ArmSwapTransition. Host-only in practice
+// (FireSwap runs on host only) but the write is safe on any client;
+// peer replicas will be overwritten by the next ENEMY_UPDATE tick
+// from host regardless.
 //
 // sourceHealth = the En_St's colChkInfo.health at swap trigger time.
 // For OnHitDuringDescent this is the PRE-hit value (see z_en_st.c:517
@@ -222,13 +227,15 @@ extern "C" void Anchor_Enhance_EnSw_ArmSwapTransition(EnSw* actor,
 // OnGroundImpact the En_St isn't taking damage so it's the current
 // value.
 //
-// Applied HP = min(sourceHealth, configured MaxHP). Cap ensures the
-// new Skullwalltula never exceeds its own max — user tuning the
-// MaxHP CVar upward simultaneously raises the carryover ceiling.
+// Applied HP = min(sourceHealth, GetSwapMaxHP()). Cap defaults to 2
+// so a full-HP En_St (vanilla 2) yields a full-HP En_Sw at defaults
+// (fixes the original 2→1 HP loss bug out of the box). If SoH mods
+// raise En_St above 2, user should raise SwapMaxHP to match to
+// preserve full carryover.
 //
 // If sourceHealth is 0 (shouldn't happen — swap-firing En_St is
-// still alive), we skip the write so the En_Sw keeps its Init
-// value (which itself will be >=1 via Feature A's clamp).
+// still alive), we skip the write so the En_Sw keeps its vanilla
+// Init value.
 extern "C" void Anchor_Enhance_EnSw_ApplyCarryoverHealth(EnSw* actor,
                                                           PlayState* play,
                                                           uint8_t sourceHealth) {
@@ -238,9 +245,9 @@ extern "C" void Anchor_Enhance_EnSw_ApplyCarryoverHealth(EnSw* actor,
     if (desc == nullptr) return;
     if (!desc->IsInstanceEnhanced(&actor->actor, play)) return;
 
-    const int maxHP = desc->GetConfiguredMaxHP();
-    const int applied = std::min<int>((int)sourceHealth, maxHP);
+    const int swapMax = desc->GetSwapMaxHP();
+    const int applied = std::min<int>((int)sourceHealth, swapMax);
     actor->actor.colChkInfo.health = (u8)applied;
-    SPDLOG_INFO("[EnSwCarryover] Applied HP={} (source={} cap={})",
-                applied, (int)sourceHealth, maxHP);
+    SPDLOG_INFO("[EnSwCarryover] Applied HP={} (source={} swapMax={})",
+                applied, (int)sourceHealth, swapMax);
 }

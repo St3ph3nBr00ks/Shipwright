@@ -77,22 +77,21 @@ public:
         return "gEnhancements.Skullwalltula.AggressiveAcquire";
     }
 
-    // Configurable max HP CVar (GH #210 v2, 2026-08-06). Independent of
-    // the three capability CVars — user can raise combat-variant HP
-    // without enabling nav / gravity / active-aggro. Also acts as the
-    // ceiling for the En_St → En_Sw swap carryover (a Skulltula
-    // transforming into a Skullwalltula brings its remaining HP with
-    // it, capped by this value).
-    const char* MaxHPCVar() const {
-        return "gEnhancements.Skullwalltula.MaxHP";
+    // Swap-spawned Skullwalltula HP cap (GH #210 v2, 2026-08-06,
+    // rescoped from broader MaxHP). Applies ONLY when the En_Sw
+    // spawned via the En_St → En_Sw swap in FireSwap. Vanilla and
+    // other-origin En_Sw are untouched — their HP comes from
+    // vanilla's D_80B0F074 init struct + gold-token doubling +
+    // any modifiers from other SoH enhancements.
+    const char* SwapMaxHPCVar() const {
+        return "gEnhancements.Skullwalltula.SwapMaxHP";
     }
 
-    // Reads MaxHPCVar and clamps to [1, 127]. Lower bound 1 because a
-    // 0-HP spawn is already dead. Upper bound 127 because MP sync
-    // caches health as `s8` in EnemyNetId; wider values would wrap.
-    // Called from OnInit (fresh spawns) and from EnStBridge FireSwap
-    // (carryover cap).
-    int GetConfiguredMaxHP() const;
+    // Reads SwapMaxHPCVar and clamps to [1, 127]. Lower bound 1 (a
+    // 0-HP spawn is already dead). Upper bound 127 to fit the s8
+    // netHealth MP-sync cache in EnemyNetId. Only called from
+    // EnStBridge FireSwap via Anchor_Enhance_EnSw_ApplyCarryoverHealth.
+    int GetSwapMaxHP() const;
 
     // Parameter blocks. Values field-tuned during Phase 2 pilot;
     // adjusted here rather than at call sites so the descriptor stays

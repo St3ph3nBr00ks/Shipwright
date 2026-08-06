@@ -798,20 +798,26 @@ void SohMenu::AddMenuFlotilla() {
             "PickGazeTarget + ShouldRelaxLungeGates fire via the "
             "existing vanilla-hook path."));
 
-    AddWidget(path, "Max HP: combat-variant Skullwalltula spawn health##Flotilla",
+    AddWidget(path, "Swap Max HP: cap for Skullwalltulas spawned via Skulltula→Skullwalltula swap##Flotilla",
               WIDGET_CVAR_SLIDER_INT)
-        .CVar(CVAR_ENHANCEMENT("Skullwalltula.MaxHP"))
+        .CVar(CVAR_ENHANCEMENT("Skullwalltula.SwapMaxHP"))
         .PreFunc(FlotillaHostSettingsPreFunc)
         .Callback(FlotillaHostSettingsCallback)
-        .Options(IntSliderOptions().Min(1).Max(20).DefaultValue(1).Tooltip(
-            "How many hits it takes to kill a combat-variant "
-            "Skullwalltula. Vanilla is 1 (one-shot with any weapon); "
-            "raise this to make them tankier.\n\n"
-            "Applies only to combat variants (params & 0xE000 == 0). "
-            "Gold-token variants keep their vanilla 2-HP.\n\n"
-            "Also acts as the HP ceiling for the Skulltula → "
-            "Skullwalltula swap carryover: a transforming Skulltula "
-            "brings its remaining HP with it, capped by this value."));
+        .Options(IntSliderOptions().Min(1).Max(20).DefaultValue(2).Tooltip(
+            "HP ceiling for Skullwalltulas that spawn as the result "
+            "of a ceiling-Skulltula → Skullwalltula transform (see "
+            "the Skulltula GroundDrop / AggressiveDrop CVars below).\n\n"
+            "The swap carries over the source Skulltula's current HP, "
+            "clamped by this value. Default 2 matches vanilla Skulltula "
+            "base HP so a full-HP Skulltula transforms into a full-HP "
+            "(2) Skullwalltula out of the box.\n\n"
+            "If other SoH enhancements raise Skulltula HP above 2, "
+            "raise this to match if you want full carryover; otherwise "
+            "the swap-Skullwalltula's HP is capped here.\n\n"
+            "This CVar does NOT affect vanilla-spawned Skullwalltulas "
+            "(scene-placed, director-spawned, etc.) — those keep their "
+            "vanilla HP (1 for combat, 2 for gold-token) plus any "
+            "modifications from other SoH enhancements."));
 
     AddWidget(path, "Skulltula (En_St) — chance to transform into Skullwalltula",
               WIDGET_SEPARATOR_TEXT);

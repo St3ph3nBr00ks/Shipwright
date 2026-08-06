@@ -70,12 +70,14 @@ bool EnSwDescriptor::IsInstanceEnhanced(Actor* actor, PlayState* play) {
     return variant == 0;
 }
 
-int EnSwDescriptor::GetConfiguredMaxHP() const {
+int EnSwDescriptor::GetSwapMaxHP() const {
     // Reader clamp: 1 = still alive; 127 = fits s8 netHealth cache used
     // for MP sync (see session_state.md "EnemyNetId struct" — netHealth
     // is s8). Widening the cache would violate YAGNI for the values
     // this CVar is intended to expose (spider is meant to be 2-5 HP).
-    const int raw = AnchorCVarSync::GetEnforcedInt(MaxHPCVar(), 1);
+    // Default 2 matches vanilla En_St base HP — a full-HP swap carries
+    // over cleanly at defaults.
+    const int raw = AnchorCVarSync::GetEnforcedInt(SwapMaxHPCVar(), 2);
     if (raw < 1)   return 1;
     if (raw > 127) return 127;
     return raw;
