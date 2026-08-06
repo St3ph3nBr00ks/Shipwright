@@ -83,6 +83,14 @@ int EnSwDescriptor::GetSwapMaxHP() const {
     return raw;
 }
 
+bool EnSwDescriptor::IsWebAttackEnabled() const {
+    // Master gate for the stun/web attack. Consumed by the state
+    // machine's per-tick WebAttack entry check + the projectile's
+    // fire-arm logic. Enforced via AnchorCVarSync so host tuning
+    // propagates to all clients (Rule 1 host-authoritative decision).
+    return AnchorCVarSync::GetEnforcedInt(WebAttackCVar(), 0) != 0;
+}
+
 void EnSwDescriptor::OnNavTick(Actor* actor, PlayState* play) {
     if (!IsInstanceEnhanced(actor, play)) return;
 

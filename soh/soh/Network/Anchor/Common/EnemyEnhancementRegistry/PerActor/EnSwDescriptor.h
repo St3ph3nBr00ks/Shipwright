@@ -93,6 +93,16 @@ public:
     // EnStBridge FireSwap via Anchor_Enhance_EnSw_ApplyCarryoverHealth.
     int GetSwapMaxHP() const;
 
+    // Web-attack CVar (GH #333, 2026-08-06). Master gate for the
+    // stun/web ranged attack. When ON, enhanced combat-variant
+    // Skullwalltulas periodically fire a web projectile that
+    // stuns hit players. Gold-token variants unaffected via
+    // IsInstanceEnhanced. See GH #333 for A1-A15 resolved design.
+    const char* WebAttackCVar() const {
+        return "gEnhancements.Skullwalltula.WebAttack";
+    }
+    bool IsWebAttackEnabled() const;
+
     // Parameter blocks. Values field-tuned during Phase 2 pilot;
     // adjusted here rather than at call sites so the descriptor stays
     // authoritative.

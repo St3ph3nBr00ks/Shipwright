@@ -798,6 +798,27 @@ void SohMenu::AddMenuFlotilla() {
             "PickGazeTarget + ShouldRelaxLungeGates fire via the "
             "existing vanilla-hook path."));
 
+    AddWidget(path, "Web attack: spider fires stun web at nearest player in range##Flotilla",
+              WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("Skullwalltula.WebAttack"))
+        .PreFunc(FlotillaHostSettingsPreFunc)
+        .Callback(FlotillaHostSettingsCallback)
+        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
+            "When ON: enhanced combat-variant Skullwalltulas "
+            "periodically rotate rear-to-target and fire a white "
+            "web projectile at the nearest player within 300u. Hit "
+            "player is stunned (input locked); escape by mash "
+            "(10 discrete A/B/stick events within 3s) or by a "
+            "teammate slicing the web with a sword or burning it "
+            "with any fire source (torches, deku sticks, fire "
+            "arrows, lava, flaming bats, etc.).\n\n"
+            "Cooldown 10s per Skullwalltula. Zero damage — the "
+            "stun IS the danger.\n\n"
+            "Gold-token variants (params & 0xE000 non-zero) are "
+            "NOT affected — token skulltulas remain fully vanilla "
+            "static.\n\n"
+            "See GH #333 for full design brief."));
+
     AddWidget(path, "Swap Max HP: cap for Skullwalltulas spawned via Skulltula→Skullwalltula swap##Flotilla",
               WIDGET_CVAR_SLIDER_INT)
         .CVar(CVAR_ENHANCEMENT("Skullwalltula.SwapMaxHP"))

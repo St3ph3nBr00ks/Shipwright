@@ -205,6 +205,17 @@ const std::vector<IntCVarEntry> kEnforcedInts = {
     // s8 netHealth MP-sync cache.
     { CVAR_ENHANCEMENT("Skullwalltula.SwapMaxHP"),         2 },
 
+    // Skullwalltula stun/web ranged attack (GH #333). Default 0 =
+    // vanilla-preserving. When ON, enhanced combat-variant
+    // Skullwalltulas periodically rotate rear-to-target + fire a
+    // white web projectile at nearest player within 300u. Hit
+    // player is stunned (input locked) until self-mash (10 discrete
+    // A/B/stick events within 3s) OR peer-rescue (sword hit or
+    // fire-source hit on the web overlay). Gold-token variants
+    // unaffected via IsInstanceEnhanced. See GH #333 for full
+    // design brief (A1-A15 resolved 2026-08-06).
+    { CVAR_ENHANCEMENT("Skullwalltula.WebAttack"),         0 },
+
     // --- Pillar 5 Phase 3 — Skulltula → Skullwalltula swap (GH #210) ---
     // Host-authoritative. When a ceiling Skulltula (En_St) descends
     // toward the ground, it may transform into a Skullwalltula (En_Sw)
