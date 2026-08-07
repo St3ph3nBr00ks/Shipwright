@@ -14,7 +14,9 @@
 #include "soh/Network/Anchor/Anchor.h"
 
 #include "PlayerStunManager.h"
-#include "soh/Network/Anchor/DummyPlayer.h"
+// Anchor.h (included above) exposes Anchor::Instance->GetDummyPlayerClientId
+// — no separate DummyPlayer header exists (DummyPlayer.cpp uses forward-
+// decls in Anchor.h).
 #include <spdlog/spdlog.h>
 
 #include <chrono>
