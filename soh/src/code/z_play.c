@@ -43,6 +43,7 @@ s16 gEnTeamMarkerId;
 s16 gEnKarebabaGeyserId;
 s16 gEnDekubabaAcidId;
 s16 gEnDekubabaSeedId;
+s16 gEnSwWebId;
 
 void Play_SpawnScene(PlayState* play, s32 sceneId, s32 spawn);
 

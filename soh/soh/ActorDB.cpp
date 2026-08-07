@@ -731,6 +731,24 @@ static ActorDBInit EnDekubabaSeedInit = {
 };
 extern "C" s16 gEnDekubabaSeedId;
 
+// GH #333 — stun/web projectile fired by enhanced En_Sw during
+// WebAttack state. See GH #333 comment 5209793604 for full design brief.
+#include "src/overlays/actors/ovl_En_Sw_Web/z_en_sw_web.h"
+static ActorDBInit EnSwWebInit = {
+    "En_Sw_Web",
+    "Skullwalltula Web stun projectile (Flotilla)",
+    ACTORCAT_MISC,
+    (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED),
+    OBJECT_GAMEPLAY_KEEP,
+    sizeof(EnSwWeb),
+    (ActorFunc)EnSwWeb_Init,
+    (ActorFunc)EnSwWeb_Destroy,
+    (ActorFunc)EnSwWeb_Update,
+    (ActorFunc)EnSwWeb_Draw,
+    nullptr,
+};
+extern "C" s16 gEnSwWebId;
+
 void ActorDB::AddBuiltInCustomActors() {
     gEnPartnerId        = ActorDB::Instance->AddEntry(EnPartnerInit).entry.id;
     gEnFollowerId       = ActorDB::Instance->AddEntry(EnFollowerInit).entry.id;
@@ -739,6 +757,7 @@ void ActorDB::AddBuiltInCustomActors() {
     gEnKarebabaGeyserId = ActorDB::Instance->AddEntry(EnKarebabaGeyserInit).entry.id;
     gEnDekubabaAcidId   = ActorDB::Instance->AddEntry(EnDekubabaAcidInit).entry.id;
     gEnDekubabaSeedId   = ActorDB::Instance->AddEntry(EnDekubabaSeedInit).entry.id;
+    gEnSwWebId          = ActorDB::Instance->AddEntry(EnSwWebInit).entry.id;
 }
 
 extern "C" ActorDBEntry* ActorDB_Retrieve(const int id) {
