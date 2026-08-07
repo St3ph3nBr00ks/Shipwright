@@ -2259,8 +2259,11 @@ extern "C" int Anchor_Enhance_EnSwWeb_IsPlayerStunned(Actor* player);
 // Forward-decl the bridge fire helper — spawns projectile locally on
 // host + broadcasts EN_SW_WEB_FIRED to peers so their copies spawn
 // deterministically. Phase 3 stubs the broadcast (host-only local
-// spawn); Phase 4b wires the packet.
+// spawn); Phase 4b wires the packet. Target is passed so the bridge
+// can compute a 3D aim vector (fixes BIG-variant aim-too-high per
+// 2026-08-06 field-test).
 extern "C" void Anchor_Enhance_EnSwWeb_FireProjectile(Actor* spider,
+                                                       Actor* target,
                                                        PlayState* play,
                                                        s16 aimYaw);
 
@@ -2331,14 +2334,34 @@ static void TickWebAttack(EnSw* self, PlayState* play,
     // Wind-up rotation — rotate rear (0x8000 offset from facing) to
     // point at target. shape.rot.y is the facing direction (front);
     // to aim rear at target, facing must point AWAY (target yaw +
-    // 0x8000). Uses smooth-step so the rotation reads as a deliberate
-    // turn during the ~15-frame window.
+    // 0x8000). Smooth-step step widened 3× (user 2026-08-06 field-
+    // test: default step 0x1000 was too slow to complete rotation
+    // in the 15-frame window). New step 0x3000 = ~16.9°/frame ~=
+    // 253°/window, enough to complete a full 180° turnaround
+    // comfortably.
     const s16 yawTowardTarget = Actor_WorldYawTowardActor(
         &self->actor, s.webAttackTargetActor);
     const s16 desiredFacing = (s16)(yawTowardTarget + 0x8000);
     Math_SmoothStepToS(&self->actor.shape.rot.y, desiredFacing,
-                        3, 0x1000, 0x200);
+                        3, 0x3000, 0x600);
     self->actor.world.rot.y = self->actor.shape.rot.y;
+
+    // Abdomen-raise pose during wind-up. Whole-body pitch tilt is
+    // the cheapest v1 approximation of "spider rears back to fire"
+    // — no per-limb work needed. Pitch smooth-steps toward
+    // kWebAttackRearBackPitch during wind-up; on fire, pitch snaps
+    // back to whatever ambient state resumes with (GroundPursue's
+    // TransitionTo will handle re-orientation).
+    //
+    // Direction convention: shape.rot.x = -0x4000 is the "flat on
+    // ground, dorsal-up, skull-forward" pose (per session_state
+    // Phase 3 comment). More negative = head tilts down further /
+    // rear rises. We target -0x5800 for a visible rear-raise
+    // without going full-vertical.
+    constexpr s16 kWebAttackRearBackPitch = (s16)-0x5800;
+    Math_SmoothStepToS(&self->actor.shape.rot.x, kWebAttackRearBackPitch,
+                        3, 0x800, 0x100);
+    self->actor.world.rot.x = self->actor.shape.rot.x;
 
     // Wind-up countdown → fire.
     s.webAttackWindupFrames--;
@@ -2346,9 +2369,12 @@ static void TickWebAttack(EnSw* self, PlayState* play,
 
     // Fire — spawn projectile aimed at target (aim yaw = toward target,
     // NOT rear-facing). The rear-orientation is cosmetic; the projectile
-    // still needs to fly TO the target, not away from it.
-    Anchor_Enhance_EnSwWeb_FireProjectile(&self->actor, play,
-                                            yawTowardTarget);
+    // still needs to fly TO the target, not away from it. Pass the
+    // target actor so the bridge can compute a 3D aim vector (fixes
+    // BIG-variant spider firing over target's head — user 2026-08-06).
+    Anchor_Enhance_EnSwWeb_FireProjectile(&self->actor,
+                                            s.webAttackTargetActor,
+                                            play, yawTowardTarget);
 
     // Arm cooldown. Return to ambient (GroundPursue is the safe default
     // — the next Tick will re-evaluate WallPursue vs GroundPursue based

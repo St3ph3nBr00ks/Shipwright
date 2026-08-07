@@ -972,6 +972,10 @@ void Anchor::RegisterHooks() {
         // inside PlayerStunManager's Tick — but see the OnPlayerUpdate
         // block below where we ALSO zero for belt-and-suspenders).
         AnchorPlayerStun::Tick(gPlayState);
+        // GH #333 v1.1 — spawn web-overlay particles around each
+        // stunned player each frame (user 2026-08-06 field-test:
+        // stun applied but no visual on player).
+        AnchorPlayerStun::DrawOverlay(gPlayState);
 
         // #63 — pendingTimeSync timeout. Counter increments each frame
         // while the flag is set. If no incoming TIME_SYNC or

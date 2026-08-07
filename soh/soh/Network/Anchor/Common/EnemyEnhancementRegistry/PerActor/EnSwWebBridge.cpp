@@ -99,9 +99,18 @@ extern "C" int Anchor_Enhance_EnSwWeb_IsPlayerStunned(Actor* player) {
 // deterministically (mirrors Dekubaba acid MP pattern per
 // z_en_dekubaba_acid.c file header note).
 //
-// Aim yaw encoded into params via /8 quantization (params is s16,
-// aimYaw is s16 — full range fits at 1:8 ratio).
+// Aim: horizontal component (yaw) encoded into params via /8
+// quantization; vertical component computed here and applied by
+// post-spawn velocity override. Vanilla Init sets straight-line
+// XZ motion; we then overwrite velocity.y to make the projectile
+// aim at target's torso height regardless of spider elevation.
+//
+// User 2026-08-06 field-test: BIG-variant Skullwalltulas (from
+// En_St→En_Sw swap) hover at ceiling height, so projectile fired
+// straight-line at spider's Y sailed over child-Link's head. Fix:
+// compute Y velocity so trajectory intersects target's torso.
 extern "C" void Anchor_Enhance_EnSwWeb_FireProjectile(Actor* spider,
+                                                       Actor* target,
                                                        PlayState* play,
                                                        s16 aimYaw) {
     if (spider == nullptr || play == nullptr) return;
@@ -120,18 +129,36 @@ extern "C" void Anchor_Enhance_EnSwWeb_FireProjectile(Actor* spider,
     const float sz = Math_CosS(aimYaw);
     const Vec3f spawnPos = {
         spider->world.pos.x + sx * kSpawnForwardOffset,
-        spider->world.pos.y + 20.0f,  // ~body-center Y so web flies at Link torso
+        spider->world.pos.y + 20.0f,  // spider body-center Y
         spider->world.pos.z + sz * kSpawnForwardOffset,
     };
 
     // Params encodes aim yaw as yaw/8 (matches Dekubaba acid pattern).
     const s16 paramsYaw = (s16)(aimYaw / 8);
 
-    Actor_Spawn(&play->actorCtx, play,
-                gEnSwWebId,
-                spawnPos.x, spawnPos.y, spawnPos.z,
-                /*rot.x=*/0,
-                /*rot.y=*/aimYaw,
-                /*rot.z=*/0,
-                paramsYaw);
+    Actor* newProj = Actor_Spawn(&play->actorCtx, play,
+                                   gEnSwWebId,
+                                   spawnPos.x, spawnPos.y, spawnPos.z,
+                                   /*rot.x=*/0,
+                                   /*rot.y=*/aimYaw,
+                                   /*rot.z=*/0,
+                                   paramsYaw);
+    if (newProj == nullptr) return;
+
+    // Aim-Y correction (post-Init override). Init set velocity to
+    // straight-line horizontal (velocity.y = 0). Recompute so the
+    // trajectory intersects target's torso.
+    if (target != nullptr) {
+        constexpr float kTargetTorsoOffsetY = 30.0f;  // ~Link torso above feet
+        constexpr float kXZSpeed = 10.0f;             // must match z_en_sw_web.c EN_SW_WEB_XZ_SPEED
+        const float targetAimY = target->world.pos.y + kTargetTorsoOffsetY;
+        const float dx = target->world.pos.x - spawnPos.x;
+        const float dz = target->world.pos.z - spawnPos.z;
+        const float horizDist = sqrtf(dx * dx + dz * dz);
+        if (horizDist > 1.0f) {
+            const float flightFrames = horizDist / kXZSpeed;
+            const float dy = targetAimY - spawnPos.y;
+            newProj->velocity.y = dy / flightFrames;
+        }
+    }
 }

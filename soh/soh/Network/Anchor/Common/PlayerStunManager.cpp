@@ -20,6 +20,7 @@
 #include <spdlog/spdlog.h>
 
 #include <chrono>
+#include <cmath>       // GH #333 v1.1 — cosf/sinf for overlay particle ring
 #include <cstring>
 #include <unordered_map>
 
@@ -241,6 +242,80 @@ void Tick(PlayState* play) {
     entry.prevStickX   = curSX;
     entry.prevStickY   = curSY;
     entry.prevCardinal = curCard;
+}
+
+// GH #333 v1.1 (user 2026-08-06 field-test) — web overlay visual.
+// Vanilla codebase has NO usable web texture / cylinder DList (search
+// agent confirmed 2026-08-06). Placeholder v1 approach: spawn white
+// EffectSsDust particles in a ring around each stunned player each
+// tick. Reads as a "wrapped in something" cloud without requiring
+// custom asset authoring. v2 (deferred): spherical web mesh with
+// tiled web texture applied.
+//
+// Called from an OnActorUpdate hook or Tick — needs a PlayState to
+// spawn particles. Iterates the stun map, finds each stunned player's
+// actor via clientId → actor lookup, spawns ~6 white dust particles
+// in a ring at body height each frame.
+static Color_RGBA8 sWebOverlayPrimColor = { 240, 240, 240, 200 };
+static Color_RGBA8 sWebOverlayEnvColor  = { 200, 200, 200, 255 };
+static constexpr int   kOverlayParticleCount = 6;
+static constexpr float kOverlayRingRadius    = 20.0f;
+static constexpr float kOverlayHeightOffset  = 15.0f;  // above feet
+static constexpr int16_t kOverlayDustScale     = 100;
+static constexpr int16_t kOverlayDustScaleStep = 3;
+static constexpr int16_t kOverlayDustLife      = 8;
+
+// Resolve a clientId back to its player actor (local or DummyPlayer).
+// Returns nullptr if the client isn't currently observable. Standard
+// walk-ACTORCAT_NPC pattern per Follower.cpp:874-889 (no dedicated
+// reverse lookup exists in the Anchor API — only actor→clientId
+// via GetDummyPlayerClientId).
+static Actor* ClientIdToPlayerActor(uint32_t clientId, PlayState* play) {
+    if (play == nullptr || Anchor::Instance == nullptr) return nullptr;
+    if (clientId == Anchor::Instance->ownClientId) {
+        Player* localP = GET_PLAYER(play);
+        return (localP != nullptr) ? &localP->actor : nullptr;
+    }
+    Actor* cand = play->actorCtx.actorLists[ACTORCAT_NPC].head;
+    while (cand != nullptr) {
+        if (cand->id == ACTOR_EN_OE2 &&
+            cand->update == (ActorFunc)DummyPlayer_Update &&
+            Anchor::Instance->GetDummyPlayerClientId(cand) == clientId) {
+            return cand;
+        }
+        cand = cand->next;
+    }
+    return nullptr;  // peer not in scene / hasn't spawned locally
+}
+
+void DrawOverlay(PlayState* play) {
+    if (play == nullptr) return;
+    if (sStunStates.empty()) return;
+
+    for (const auto& kv : sStunStates) {
+        Actor* actor = ClientIdToPlayerActor(kv.first, play);
+        if (actor == nullptr) continue;
+
+        const float baseY = actor->world.pos.y + kOverlayHeightOffset;
+        for (int i = 0; i < kOverlayParticleCount; i++) {
+            const float angle = (float)i / kOverlayParticleCount * 6.28318f;
+            Vec3f particlePos = {
+                actor->world.pos.x + kOverlayRingRadius * cosf(angle),
+                baseY,
+                actor->world.pos.z + kOverlayRingRadius * sinf(angle),
+            };
+            Vec3f vel   = { 0.0f, 0.5f, 0.0f };
+            Vec3f accel = { 0.0f, 0.0f, 0.0f };
+            EffectSsDust_Spawn(play, /*drawFlags*/ 0,
+                                &particlePos, &vel, &accel,
+                                &sWebOverlayPrimColor,
+                                &sWebOverlayEnvColor,
+                                kOverlayDustScale,
+                                kOverlayDustScaleStep,
+                                kOverlayDustLife,
+                                /*updateMode*/ 0);
+        }
+    }
 }
 
 }  // namespace AnchorPlayerStun

@@ -110,6 +110,14 @@ void ClearStun(uint32_t clientId, ClearReason reason);
 //   - Cutscene/scene-change local clear detect.
 void Tick(PlayState* play);
 
+// GH #333 v1.1 (user 2026-08-06 field-test) — spawn web-overlay
+// particles around each currently-stunned player each frame. Iterates
+// the stun map, resolves each clientId to their actor (local Link
+// or DummyPlayer), spawns a ring of white EffectSsDust particles at
+// body height. Called from OnGameFrameUpdate. Cheap when map is
+// empty; iterates up to N stunned peers otherwise.
+void DrawOverlay(PlayState* play);
+
 // Scene-init hook — clears the entire stun map on scene transition.
 // A10: web auto-clears on scene start (both because Play_InCsMode
 // often becomes true briefly during transitions AND because peers
