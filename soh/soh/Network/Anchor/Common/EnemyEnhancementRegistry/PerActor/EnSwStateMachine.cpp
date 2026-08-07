@@ -27,6 +27,7 @@
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/GroupMovement.h"
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Bug 5 fix — nav JumpAnchor consumption
 #include "soh/Network/Anchor/Common/EnforcedCVars.h"   // GH #333 — WebAttack CVar read in TryEnterWebAttack
+#include "soh/Network/Anchor/Common/SceneAuthority.h"  // GH #333 — IsMyCurrentRoomHost gate in TryEnterWebAttack
 
 // functions.h + z64bgcheck.h pulled in transitively via EnSwStateMachine.h's
 // z_en_sw.h -> global.h -> {functions.h, z64.h -> z64bgcheck.h}. Pitfall 40:
@@ -51,6 +52,16 @@ extern "C" void EnSw_ForceAmbient(EnSw* actor);
 namespace AnchorEnemyEnhancement {
 
 namespace {
+
+// GH #333 — WebAttack helpers forward-decl. Bodies defined further
+// down (~line 2200+) alongside other WebAttack code. Forward-decl is
+// required because TickWallIdle / TickWallPursue / TickGroundPursue
+// call TryEnterWebAttack at lines ~1062 / 1080 / 1405 — well above
+// the definition. C++ single-pass name lookup (Pitfall 14).
+static bool TryEnterWebAttack(EnSw* self, PlayState* play,
+                                EnSwEnhancedState& s);
+static void TickWebAttack(EnSw* self, PlayState* play,
+                            EnSwEnhancedState& s);
 
 // -------------------------------------------------------------------
 // Per-actor state map + helpers
