@@ -28,6 +28,10 @@ extern "C" {
 #include "macros.h"
 #include "functions.h"
 #include "variables.h"
+// variables.h declares gSaveContext but NOT gPlayState. Same pattern
+// used across the codebase (HookHandlers.cpp / EnemyState.cpp /
+// Director.cpp etc. all declare this manually).
+extern PlayState* gPlayState;
 }
 
 namespace AnchorPlayerStun {
