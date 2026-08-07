@@ -68,6 +68,7 @@ enum class EnSwState : uint8_t {
     WalkLunge            = 9,  // custom ground wind-up + straight-line dash (M11 —
                                 // replaces vanilla func_80B0E728 walk-lunge for
                                 // enhanced spiders, eliminates actionFunc oscillation)
+    WebAttack            = 10, // GH #333 — rotate rear-to-target, wind-up, fire En_Sw_Web
 };
 
 // -------------------------------------------------------------------
@@ -181,6 +182,17 @@ struct EnSwEnhancedState {
     //     a fresh random duration (10-40 frames, matching vanilla
     //     func_80B0E5E0 unk_388 = Rand_S16Offset(10, 30)).
     bool idleGazeIsLooking = false;
+
+    // GH #333 — WebAttack state fields.
+    //   webAttackCooldownFrames: counts down each tick; MaybeTriggerWebAttack
+    //     entry gate checks == 0. Reset to MsToGameTicks(10000) on fire.
+    //   webAttackWindupFrames:    counts down inside TickWebAttack from
+    //     kWebAttackWindupFrames to 0; projectile fires at 0, state exits.
+    //   webAttackTargetActor:     cached at entry for stable aim through
+    //     wind-up (target may move but aim yaw is locked at entry).
+    int    webAttackCooldownFrames = 0;
+    int    webAttackWindupFrames   = 0;
+    Actor* webAttackTargetActor    = nullptr;
 
     // Walk-animation gate — true only when the spider is actually
     // translating in XZ (wall crawling, ground pursuing, walk-lunge

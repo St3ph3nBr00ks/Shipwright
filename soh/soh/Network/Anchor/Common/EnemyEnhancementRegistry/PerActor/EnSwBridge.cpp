@@ -87,14 +87,16 @@ extern "C" void Anchor_Enhance_EnSw_Tick(EnSw* actor, PlayState* play) {
 
     // Enhanced state machine — Option B pilot (Plans/en_sw_enhanced_
     // state_machine_pilot.md). Fires when NavConsume CVar is enabled
-    // AND the actor was snapshotted at OnInit. Runs AFTER vanilla
-    // actionFunc (this is a post-hook); state machine overrides motion
-    // in ambient states, yields to vanilla when actionFunc has advanced
-    // to lunge cycle. Internal CVar check happens inside the state
-    // machine's Tick to keep the gate + snapshot side-effect in one
-    // place.
-    if (AnchorCVarSync::GetEnforcedInt(
-            "gEnhancements.Skullwalltula.NavConsume", 0) != 0) {
+    // OR WebAttack CVar is enabled (GH #333 — WebAttack entry gate
+    // lives inside ambient state ticks, so the state machine must
+    // run for the gate to fire). Runs AFTER vanilla actionFunc
+    // (this is a post-hook); state machine overrides motion in
+    // ambient states, yields to vanilla when actionFunc has advanced
+    // to lunge cycle.
+    const bool navConsume = AnchorCVarSync::GetEnforcedInt(
+        "gEnhancements.Skullwalltula.NavConsume", 0) != 0;
+    const bool webAttack  = desc->IsWebAttackEnabled();
+    if (navConsume || webAttack) {
         AnchorEnemyEnhancement::EnSw_EnhancedStateMachine_Tick(actor, play);
     }
 

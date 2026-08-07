@@ -67,3 +67,56 @@ extern "C" int Anchor_Enhance_EnSwWeb_DetectAndApplyHit(Actor* projectile,
     // No stun applied yet — the state infrastructure doesn't exist.
     return 1;
 }
+
+// Phase 3 stub — always returns false (nobody is ever stunned yet).
+// Phase 4a lands the PlayerStunState sidecar map on Anchor; Phase 4b
+// wires this to check that map by resolving actor→clientId first.
+// Used by EnSwStateMachine::TryEnterWebAttack per A15 (no-multi-stack:
+// don't fire web at already-stunned target).
+extern "C" int Anchor_Enhance_EnSwWeb_IsPlayerStunned(Actor* player) {
+    (void)player;
+    return 0;  // Phase 3: nobody's stunned yet; always allow fire.
+}
+
+// Fire helper — spawns the En_Sw_Web projectile locally on host.
+// Phase 3 body: local Actor_Spawn only. Phase 4b adds
+// EN_SW_WEB_FIRED packet broadcast so peers spawn their own copy
+// deterministically (mirrors Dekubaba acid MP pattern per
+// z_en_dekubaba_acid.c file header note).
+//
+// Aim yaw encoded into params via /8 quantization (params is s16,
+// aimYaw is s16 — full range fits at 1:8 ratio).
+extern "C" void Anchor_Enhance_EnSwWeb_FireProjectile(Actor* spider,
+                                                       PlayState* play,
+                                                       s16 aimYaw) {
+    if (spider == nullptr || play == nullptr) return;
+
+    // Only host spawns (A13). Peer will spawn its own copy when the
+    // EN_SW_WEB_FIRED packet lands (Phase 4b).
+    if (!SceneAuthority::IsMyCurrentRoomHost()) return;
+
+    // Spawn origin: slightly forward from the spider's rear along
+    // the aim direction (rear is aimed at target during wind-up per
+    // TickWebAttack, so aim direction = forward from rear = toward
+    // target). Offset ~15u forward so the projectile doesn't
+    // immediately overlap the spider's own body.
+    constexpr float kSpawnForwardOffset = 15.0f;
+    const float sx = Math_SinS(aimYaw);
+    const float sz = Math_CosS(aimYaw);
+    const Vec3f spawnPos = {
+        spider->world.pos.x + sx * kSpawnForwardOffset,
+        spider->world.pos.y + 20.0f,  // ~body-center Y so web flies at Link torso
+        spider->world.pos.z + sz * kSpawnForwardOffset,
+    };
+
+    // Params encodes aim yaw as yaw/8 (matches Dekubaba acid pattern).
+    const s16 paramsYaw = (s16)(aimYaw / 8);
+
+    Actor_Spawn(&play->actorCtx, play,
+                gEnSwWebId,
+                spawnPos.x, spawnPos.y, spawnPos.z,
+                /*rot.x=*/0,
+                /*rot.y=*/aimYaw,
+                /*rot.z=*/0,
+                paramsYaw);
+}

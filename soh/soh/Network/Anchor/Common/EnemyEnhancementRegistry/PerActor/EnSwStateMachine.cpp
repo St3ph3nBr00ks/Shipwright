@@ -26,6 +26,7 @@
 #include "soh/Network/Anchor/Common/PlayerLookup.h"
 #include "soh/Network/Anchor/Common/EnemyEnhancementRegistry/GroupMovement.h"
 #include "soh/Enhancements/RoomNavData/RoomNavData.h"  // Bug 5 fix — nav JumpAnchor consumption
+#include "soh/Network/Anchor/Common/EnforcedCVars.h"   // GH #333 — WebAttack CVar read in TryEnterWebAttack
 
 // functions.h + z64bgcheck.h pulled in transitively via EnSwStateMachine.h's
 // z_en_sw.h -> global.h -> {functions.h, z64.h -> z64bgcheck.h}. Pitfall 40:
@@ -578,6 +579,7 @@ const char* StateName(EnSwState s) {
         case EnSwState::LungeYield:           return "LUNGE_YIELD";
         case EnSwState::JumpLunge:            return "JUMP_LUNGE";
         case EnSwState::WalkLunge:            return "WALK_LUNGE";
+        case EnSwState::WebAttack:            return "WEB_ATTACK";
         case EnSwState::PermanentlyDisabled:  return "DISABLED";
     }
     return "?";
@@ -1055,6 +1057,10 @@ void TickWallIdle(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     // the standard 200u threshold.
     if (Dist3DSq(self, target) > TargetAwareDetectRangeSq(target)) return;
 
+    // GH #333 — WebAttack entry gate. Fires only when target is
+    // beyond lunge range (kWebAttackMinRange) and CVar is enabled.
+    if (TryEnterWebAttack(self, play, s)) return;
+
     TransitionTo(self, s, EnSwState::WallPursue, "target_in_range");
 }
 
@@ -1068,6 +1074,10 @@ void TickWallIdle(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
 // follow-up polish pass once field-test surfaces the numbers.
 void TickWallPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     LogTickState(self, s, "pursuing");
+
+    // GH #333 — WebAttack entry gate. Runs before other transition
+    // logic so a ranged web fires in preference to closing distance.
+    if (TryEnterWebAttack(self, play, s)) return;
 
     // Wall-base floor detection FIRST — analysis 2026-07-30 (log 770):
     // ValidateBasis's horizontal probe cannot detect when the spider
@@ -1389,6 +1399,10 @@ constexpr float kGroundFollowProbe = 200.0f;
 //     actionFunc snapshot mismatch → LungeYield)
 void TickGroundPursue(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     LogTickState(self, s, "ground_pursue");
+
+    // GH #333 — WebAttack entry gate. Fires before the pin below so
+    // a ranged web takes priority when target is beyond lunge range.
+    if (TryEnterWebAttack(self, play, s)) return;
 
     // Pin vanilla's ambient wind-up timer so `func_80B0E5E0` never
     // transitions to `func_80B0E728` on its own. WalkLunge and JumpLunge
@@ -2200,6 +2214,140 @@ void TickStSwapTransition(EnSw* self, PlayState* play, EnSwEnhancedState& s) {
     self->actor.shape.rot = self->actor.world.rot;
 }
 
+// -------------------------------------------------------------------
+// GH #333 — WebAttack state (stun web ranged attack)
+// -------------------------------------------------------------------
+//
+// Design: A1-A15 resolved on GH #333 comment 5209793604.
+//   - Range 300u (A1). Fires only when target beyond kLungeRangeCutoff.
+//   - Cooldown 10s (A3) via MsToGameTicks(10000) — framerate aware.
+//   - Wind-up 15 frames (~0.75s at 20fps, ~0.25s at 60fps).
+//   - Zero damage (A4). Projectile broadcasts STUN_APPLIED (Phase 4b).
+//   - Do NOT cancel on mid-wind-up damage (A12). Once entered, runs
+//     to fire.
+//   - No-multi-stack (A15). Bridge query
+//     Anchor_Enhance_EnSwWeb_IsPlayerStunned skips fire if target
+//     already stunned.
+//   - Gold-token filter: descriptor's IsInstanceEnhanced already
+//     gates the entire Tick call — we can't reach here on gold-token.
+
+// Framerate-aware timer constants read via Anchor::MsToGameTicks
+// (session_state.md "Framerate-aware timer infrastructure").
+static constexpr int kWebAttackCooldownMs = 10000;
+static constexpr int kWebAttackWindupFrames = 15;  // ~0.25s @ 60fps
+
+// Range boundaries per A1 + user "web priority beyond lunge range".
+// Vanilla lunge triggers when target is close; web fires beyond it.
+static constexpr float kWebAttackMinRange = 100.0f;  // below this, lunge
+static constexpr float kWebAttackMaxRange = 300.0f;  // above this, no fire
+
+// Forward-decl the bridge query for peer-stun state (A15 no-multi-stack
+// check). Stubbed to false in Phase 3; Phase 4b returns real state.
+extern "C" int Anchor_Enhance_EnSwWeb_IsPlayerStunned(Actor* player);
+
+// Forward-decl the bridge fire helper — spawns projectile locally on
+// host + broadcasts EN_SW_WEB_FIRED to peers so their copies spawn
+// deterministically. Phase 3 stubs the broadcast (host-only local
+// spawn); Phase 4b wires the packet.
+extern "C" void Anchor_Enhance_EnSwWeb_FireProjectile(Actor* spider,
+                                                       PlayState* play,
+                                                       s16 aimYaw);
+
+// Entry gate — called from ambient state tick functions before their
+// own transition logic. Returns true if we entered WebAttack (caller
+// should early-return so its own logic doesn't run this frame).
+//
+// Preconditions checked (order):
+//   1. Web attack CVar enabled (via descriptor gate — checked once at
+//      Tick top before this fires, so we assume ON here).
+//   2. Cooldown expired.
+//   3. Sticky target exists.
+//   4. Target in [kWebAttackMinRange, kWebAttackMaxRange] 3D distance.
+//   5. Target not already stunned (A15).
+//   6. Host only (A13 host-authoritative). Sync rule 1.
+static bool TryEnterWebAttack(EnSw* self, PlayState* play,
+                                EnSwEnhancedState& s) {
+    // CVar check first — cheapest bail. The state machine runs
+    // whenever NavConsume OR WebAttack is on (see EnSwBridge Tick
+    // gate), so we might be here with WebAttack off — skip.
+    if (AnchorCVarSync::GetEnforcedInt(
+            "gEnhancements.Skullwalltula.WebAttack", 0) == 0) return false;
+    if (s.webAttackCooldownFrames > 0) return false;
+    if (!SceneAuthority::IsMyCurrentRoomHost()) return false;
+
+    Actor* target = GetStickyTarget(s, self, play);
+    if (target == nullptr) return false;
+
+    const float dist2 = Dist3DSq(self, target);
+    const float minR2 = kWebAttackMinRange * kWebAttackMinRange;
+    const float maxR2 = kWebAttackMaxRange * kWebAttackMaxRange;
+    if (dist2 < minR2 || dist2 > maxR2) return false;
+
+    if (Anchor_Enhance_EnSwWeb_IsPlayerStunned(target)) return false;
+
+    // Enter WebAttack. Cache target for stable aim through wind-up.
+    s.webAttackTargetActor  = target;
+    s.webAttackWindupFrames = kWebAttackWindupFrames;
+    TransitionTo(self, s, EnSwState::WebAttack, "web_attack_entry");
+    return true;
+}
+
+// Per-tick handler while in WebAttack state. Rotates rear (shape.rot.y
+// + 0x8000) toward the cached target during wind-up; fires projectile
+// on wind-up completion; transitions back to ambient state.
+//
+// Per A12: do NOT cancel on mid-wind-up damage. This handler doesn't
+// consult health / hit state — it runs to fire regardless of what
+// happens to the spider mid-cycle. If the spider dies mid-wind-up,
+// vanilla's death sequence takes precedence (state machine dispatch
+// is preempted by the yield-check at the top of Tick), so we don't
+// need explicit death handling here.
+static void TickWebAttack(EnSw* self, PlayState* play,
+                            EnSwEnhancedState& s) {
+    LogTickState(self, s, "web_attack");
+
+    // Validate cached target still alive.
+    if (s.webAttackTargetActor == nullptr ||
+        s.webAttackTargetActor->update == nullptr) {
+        // Target gone (killed / left scene) — abort back to ambient.
+        s.webAttackTargetActor = nullptr;
+        s.webAttackCooldownFrames =
+            Anchor::Instance->MsToGameTicks(kWebAttackCooldownMs);
+        TransitionTo(self, s, EnSwState::GroundPursue, "web_target_lost");
+        return;
+    }
+
+    // Wind-up rotation — rotate rear (0x8000 offset from facing) to
+    // point at target. shape.rot.y is the facing direction (front);
+    // to aim rear at target, facing must point AWAY (target yaw +
+    // 0x8000). Uses smooth-step so the rotation reads as a deliberate
+    // turn during the ~15-frame window.
+    const s16 yawTowardTarget = Actor_WorldYawTowardActor(
+        &self->actor, s.webAttackTargetActor);
+    const s16 desiredFacing = (s16)(yawTowardTarget + 0x8000);
+    Math_SmoothStepToS(&self->actor.shape.rot.y, desiredFacing,
+                        3, 0x1000, 0x200);
+    self->actor.world.rot.y = self->actor.shape.rot.y;
+
+    // Wind-up countdown → fire.
+    s.webAttackWindupFrames--;
+    if (s.webAttackWindupFrames > 0) return;
+
+    // Fire — spawn projectile aimed at target (aim yaw = toward target,
+    // NOT rear-facing). The rear-orientation is cosmetic; the projectile
+    // still needs to fly TO the target, not away from it.
+    Anchor_Enhance_EnSwWeb_FireProjectile(&self->actor, play,
+                                            yawTowardTarget);
+
+    // Arm cooldown. Return to ambient (GroundPursue is the safe default
+    // — the next Tick will re-evaluate WallPursue vs GroundPursue based
+    // on wall-basis presence).
+    s.webAttackCooldownFrames =
+        Anchor::Instance->MsToGameTicks(kWebAttackCooldownMs);
+    s.webAttackTargetActor = nullptr;
+    TransitionTo(self, s, EnSwState::GroundPursue, "web_attack_fired");
+}
+
 }  // namespace
 
 // -------------------------------------------------------------------
@@ -2452,11 +2600,22 @@ void EnSw_EnhancedStateMachine_Tick(EnSw* self, PlayState* play) {
         case EnSwState::WalkLunge:
             TickWalkLunge(self, play, s);
             break;
+        case EnSwState::WebAttack:
+            TickWebAttack(self, play, s);
+            break;
         case EnSwState::PermanentlyDisabled:
             // No-op forever. Vanilla actionFunc runs unchanged (which
             // for combat En_Sw is: ambient wait + lunge cycle via
             // vanilla's own state machine).
             break;
+    }
+
+    // GH #333 — Cooldown decrement runs each tick regardless of state
+    // so it counts down while spider is in WallIdle/pursue/etc. Cannot
+    // go negative (early-return in TryEnterWebAttack checks > 0). Only
+    // decrements when CVar is on (avoid pointless counter drift).
+    if (s.webAttackCooldownFrames > 0) {
+        s.webAttackCooldownFrames--;
     }
 
     // SkelAnime playSpeed override — freeze when spider isn't walking.
