@@ -9,6 +9,7 @@
 #include "Common/StaleHostGate.h"     // ShouldDeferToPeerLocalAI — host-freshness gate for per-actor sync
 #include "Common/PlayerLookup.h"      // FindNearestPlayerActor
 #include "Common/SceneAuthority.h"    // IsEffectiveHost (Pillar A Phase 1)
+#include "Common/PlayerStunManager.h" // GH #333 — En_Sw web-attack stun state
 #include "Common/ItemEligibility.h"   // CanPlayerCollectItem00 (#193 Phase 0)
 #include "Common/PauseLinkBuffer.h"   // Anchor_IsDrawingPauseLink (#182 follow-up)
 #include "NPCFollower/FollowerNPC.h" // Anchor_GetCurrentlyDrawingFollowerNpc (NPC color fix)
@@ -614,6 +615,11 @@ void Anchor::RegisterHooks() {
         });
 
     COND_HOOK(OnSceneSpawnActors, isConnected, [&]() {
+        // GH #333 A10 — web-stun state auto-clears on scene init.
+        // Applies locally; each client independently detects its own
+        // scene change and clears. No wire broadcast (per A10 spec).
+        AnchorPlayerStun::OnSceneInit();
+
         // Phase 1.5 pendingMigrateBack — if this client is the original
         // owner returning mid-migration, clear the hold flag now that we've
         // physically entered a scene. Election re-runs; ownerClientId-if-
@@ -881,6 +887,32 @@ void Anchor::RegisterHooks() {
     });
 
     COND_HOOK(OnPlayerUpdate, isConnected, [&]() {
+        // GH #333 — full-action lock while local player is stunned.
+        // Per user 2026-08-06 decision: sword swings / jumps / item
+        // use / movement all blocked. Two-layer approach:
+        //   1. Zero controller input BEFORE Player reads it — kills
+        //      A/B/C/R/Z + stick. Preserves Start so pause menu still
+        //      works (system-level UX).
+        //   2. Refresh actor.freezeTimer each tick as belt-and-
+        //      suspenders — vanilla Actor_MoveXZGravity skips motion
+        //      when freezeTimer > 0, so even if input path leaks
+        //      somewhere, physics XZ is pinned.
+        if (gPlayState != nullptr && Anchor::Instance != nullptr &&
+            AnchorPlayerStun::IsClientStunned(Anchor::Instance->ownClientId)) {
+            OSContPad& cur = gPlayState->state.input[0].cur;
+            OSContPad& prev = gPlayState->state.input[0].prev;
+            // Preserve Start button so pause still works.
+            const uint16_t startBit = (cur.button & BTN_START);
+            cur.button = startBit;
+            cur.stick_x = 0;
+            cur.stick_y = 0;
+            (void)prev;  // prev untouched — vanilla edge detection irrelevant while locked
+            Player* p = GET_PLAYER(gPlayState);
+            if (p != nullptr) {
+                p->actor.freezeTimer = 60;  // refreshed per tick; ~1s at 60fps
+            }
+        }
+
         if (justLoadedSave) {
             justLoadedSave = false;
             SendPacket_RequestTeamState();
@@ -932,6 +964,14 @@ void Anchor::RegisterHooks() {
 
     COND_HOOK(OnGameFrameUpdate, isConnected, [&]() {
         ProcessIncomingPacketQueue();
+
+        // GH #333 — En_Sw web-attack stun state maintenance. Runs
+        // 10s hard-cap sweep, local escape-event tracking, cutscene
+        // local-clear. Also handles input suppression for the local
+        // player when stunned (via play->state.input[0] zero-out
+        // inside PlayerStunManager's Tick — but see the OnPlayerUpdate
+        // block below where we ALSO zero for belt-and-suspenders).
+        AnchorPlayerStun::Tick(gPlayState);
 
         // #63 — pendingTimeSync timeout. Counter increments each frame
         // while the flag is set. If no incoming TIME_SYNC or

@@ -19,6 +19,7 @@
 
 #include "soh/Network/Anchor/Common/SceneAuthority.h"
 #include "soh/Network/Anchor/Common/PlayerLookup.h"
+#include "soh/Network/Anchor/Common/PlayerStunManager.h"
 
 extern "C" {
 #include "z64.h"
@@ -58,24 +59,38 @@ extern "C" int Anchor_Enhance_EnSwWeb_DetectAndApplyHit(Actor* projectile,
 
     if (dist2 > r2) return 0;
 
-    // Phase 4b will:
-    //   1. Resolve nearest -> victimClientId (own vs DummyPlayer via
-    //      Anchor::GetDummyPlayerClientId).
-    //   2. Check if that victim is already stunned (A15 no multi-stack).
-    //   3. Broadcast STUN_APPLIED{victimClientId} and apply locally.
-    // Phase 2 stub: return true so the projectile despawns on hit.
-    // No stun applied yet — the state infrastructure doesn't exist.
+    // Phase 4a — resolve nearest to a clientId. Own Link vs DummyPlayer:
+    //   - Local Link (host's own): Anchor::Instance->ownClientId
+    //   - DummyPlayer (peer replica on host): GetDummyPlayerClientId
+    if (Anchor::Instance == nullptr) return 0;
+    uint32_t victimClientId = UINT32_MAX;
+    if (gPlayState != nullptr && GET_PLAYER(gPlayState) == (Player*)nearest) {
+        victimClientId = Anchor::Instance->ownClientId;
+    } else {
+        const uint32_t maybe = Anchor::Instance->GetDummyPlayerClientId(nearest);
+        if (maybe != 0) victimClientId = maybe;
+    }
+    if (victimClientId == UINT32_MAX) return 0;  // not a player
+
+    // A15 no-multi-stack — refuse to apply if already stunned.
+    if (AnchorPlayerStun::IsClientStunned(victimClientId)) return 0;
+
+    // Apply stun locally on host. Phase 4b will augment ApplyStun to
+    // broadcast PLAYER_STUN_APPLIED to peers so all clients agree.
+    // Source netId: v1 pass 0 (informational only — not consumed by
+    // logic yet). Phase 4b consideration: if we want peer's overlay
+    // to know which spider webbed them, thread the source EnSw netId
+    // through here.
+    AnchorPlayerStun::ApplyStun(victimClientId, /*sourceEnSwNetId*/ 0);
     return 1;
 }
 
-// Phase 3 stub — always returns false (nobody is ever stunned yet).
-// Phase 4a lands the PlayerStunState sidecar map on Anchor; Phase 4b
-// wires this to check that map by resolving actor→clientId first.
-// Used by EnSwStateMachine::TryEnterWebAttack per A15 (no-multi-stack:
-// don't fire web at already-stunned target).
+// Phase 4a — real body: query the PlayerStunManager. Returns 1 if the
+// nearest-player actor's clientId is currently stunned. Used by
+// EnSwStateMachine::TryEnterWebAttack per A15 (no-multi-stack: don't
+// fire web at already-stunned target).
 extern "C" int Anchor_Enhance_EnSwWeb_IsPlayerStunned(Actor* player) {
-    (void)player;
-    return 0;  // Phase 3: nobody's stunned yet; always allow fire.
+    return AnchorPlayerStun::IsActorStunned(player) ? 1 : 0;
 }
 
 // Fire helper — spawns the En_Sw_Web projectile locally on host.
