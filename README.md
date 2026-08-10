@@ -1,57 +1,124 @@
+# Flotilla
+
+**Flotilla** is a multiplayer / co-op mod for [Ship of Harkinian](https://www.shipofharkinian.com/)
+(SoH), the PC port of *The Legend of Zelda: Ocarina of Time*.
+
+It layers a host-authoritative enemy / world sync system, an AI companion
+subsystem, coordinated cutscenes and dialogue, and cross-client cosmetic
+sync (custom Link models, custom voice packs) on top of SoH's existing
+Anchor networking. The design target is **2–4 friends playing the main
+quest together**, not MMO-scale open worlds.
+
+Flotilla is a fork of `HarbourMasters/Shipwright` and stays in step with
+the upstream `develop-ackbar` stabilization branch.
+
 ![Ship of Harkinian](docs/shiptitle.darkmode.png#gh-dark-mode-only)
 ![Ship of Harkinian](docs/shiptitle.lightmode.png#gh-light-mode-only)
 
-## Website
+## Status — Alpha 1 in progress
 
-Official Website: https://www.shipofharkinian.com/
+Flotilla has not been released yet. The **Alpha 1** milestone target is
+the full OoT main quest playable end-to-end with 3 concurrent players
+and vanilla enemy behaviour. When Alpha 1 lands it will be distributed
+through the `soh-modding` community.
 
-## Discord
+The current working baseline is tagged `alpha1-playtest-baseline-2026-08-07`.
+Trunk (`development-multiplayer`) continues to receive Alpha 1 blocker
+work; expect rough edges if you build from head. Session-by-session
+progress lives in
+[`Claude/session_state.md`](Claude/session_state.md) and the running
+backlog in [`Claude/task_checklist.md`](Claude/task_checklist.md).
 
-Official Discord: https://discord.com/invite/shipofharkinian
+If you want to help playtest before Alpha 1 ships, the fastest path is
+to file findings against the [issue tracker](https://github.com/St3ph3nBr00ks/Shipwright/issues).
 
-If you're having any trouble after reading through this `README`, feel free to ask for help in the Support text channels. Please keep in mind that we do not condone piracy.
+## What Flotilla adds
 
-# Quick Start
+**Networking / sync**
+- Host-authoritative per-room enemy sync (~40+ enemies + Boss Goma)
+- Player pose sync via SkelAnime joint tables
+- Save-flag sync (event chk info, scene switch/clear, inf table)
+- Time-of-day sync with vanilla time-frozen-scene handling
+- Item drop sync (grass/bush drops, Deku stick drops, etc.)
+- Damage attribution + peer knockback replication (Path A / Vanilla Mirror Pattern)
+- Late-join replay of dead enemies + live world state
+- Horse (Epona) sync, including mounted play
+- Host-enforced game-settings sync (~125 gameplay-affecting CVars)
 
-The Ship does not include any copyrighted assets.  You are required to provide a supported copy of the game.
+**Multiplayer UX**
+- Team ID / PvP (Off / On / On + Friendly Fire) inherited from stock Anchor
+- Voting-skip dialogue and cutscene advance
+- Coordination-point cutscene sync (opt-in beta)
+- Colored per-peer nametags with brightness-adaptive background
+- Team Marker: through-walls fairy over same-team peers
 
-### 1. Verify your ROM dump
-You can verify you have dumped a supported copy of the game by using the compatibility checker at https://ship.equipment/. If you'd prefer to manually validate your ROM dump, you can cross-reference its `sha1` hash with the hashes [here](docs/supportedHashes.json).
+**Cosmetic sync**
+- Custom Link model packs (`.otr`) sync per player
+- Custom player voice packs (VRP format) sync per player
 
-### 2. Download The Ship of Harkinian from [Releases](https://github.com/HarbourMasters/Shipwright/releases)
+**AI companions** *(all default-off, opt-in via CVar)*
+- AI Player Follower — AI drives your own Link when you set it down
+- NPC Follower — friendly Link-lookalike companion actor
+- NPC Invader — hostile Link-lookalike pursuer
+- AI Director substrate for future spawn systems
 
-### 3. Launch the Game!
-#### Windows
-* Extract the zip
-* Launch `soh.exe`
+**Design principles**
+- Vanilla-altering features ship behind an opt-in CVar and default off, permanently
+- Boss actors are excluded from AI/nav extensions unless explicitly opted in
+- Self-hostable — the underlying Anchor relay is ~200 lines of Go, no
+  proprietary server required
 
-#### Linux
-* Place your supported copy of the game in the same folder as the appimage.
-* Execute `soh.appimage`.  You may have to `chmod +x` the appimage via terminal.
+## Trying it now (build from source)
 
-#### macOS
-* Run `soh.app`. When prompted, select your supported copy of the game.
-* You should see a notification saying `Processing OTR`, then, once the process is complete, you should get a notification saying `OTR Successfully Generated`, then the game should start.
+There are no prebuilt Flotilla binaries yet. To try the current tree
+you need to compile it yourself.
 
-#### Nintendo Switch
-* Run one of the PC releases to generate an `oot.o2r` and/or `oot-mq.o2r` file. After launching the game on PC, you will be able to find these files in the same directory as `soh.exe` or `soh.appimage`. On macOS, these files can be found in `/Users/<username>/Library/Application Support/com.shipofharkinian.soh/`
-* Copy the files to your sd card
+### Requirements
+
+- Windows 10/11 (primary supported platform — Linux/macOS have not been
+  tested with Flotilla additions)
+- Visual Studio 2022 with MSVC v14.44 and the Windows 10/11 SDK
+- CMake in PATH
+- A **legally acquired** dump of *The Legend of Zelda: Ocarina of Time*
+  (NTSC 1.2 is the confirmed working version). Check compatibility at
+  https://ship.equipment/
+- Go (for optionally running your own Anchor relay locally)
+
+### Build
+
 ```
-sdcard
-└── switch
-    └── soh
-        ├── oot-mq.o2r
-        ├── oot.o2r
-        ├── soh.nro
-        └── soh.o2r
+cmake -S . -B build/x64 -G "Visual Studio 17 2022" -T v143 -A x64 \
+      -DBUILD_REMOTE_CONTROL=ON -DDISABLE_SCRIPTING=ON
+cmake --build build/x64 --config Release
 ```
-* Launch via Atmosphere's `Game+R` launcher method.
 
-### 4. Play!
+`-DDISABLE_SCRIPTING=ON` is required on Windows/MSVC until TinyCC's
+`config.h` generation is fixed upstream. Also run
+`pip install -r libultraship/requirements.txt` so the keystore generator
+can run.
 
-Congratulations, you are now sailing with the Ship of Harkinian! Have fun!
+Detailed base build instructions live in
+[`docs/BUILDING.md`](docs/BUILDING.md); the Flotilla-specific gotchas
+(reconfigure requirements when new `.cpp` files are added under
+`soh/soh/Network/Anchor/**`, etc.) are documented in
+[`CLAUDE.md`](CLAUDE.md).
 
-# Configuration
+### Connect
+
+By default Flotilla points at the public HarbourMasters Anchor relay.
+To self-host, run `go run .` in `Anchor/anchor_git/` and set the Anchor
+host CVar to your machine's IP. No relay-side code changes are needed
+to run Flotilla — the relay is a dumb router.
+
+## Requirements for players (once Alpha 1 ships)
+
+- Windows PC per Ship of Harkinian's normal requirements
+- Legally acquired ROM
+- A friend or two willing to play with you
+- Everyone on the same Flotilla version (settings sync will refuse
+  mismatched clients)
+
+## Configuration
 
 ### Default keyboard configuration
 | N64 | A | B | Z | Start | Analog stick | C buttons | D-Pad |
@@ -71,42 +138,30 @@ Congratulations, you are now sailing with the Ship of Harkinian! Have fun!
 | Tab | Toggle Alternate assets |
 | Ctrl+R | Reset |
 
-# Project Overview
-Ship of Harkinian (SOH) is built atop a custom library dubbed libultraship (LUS). Back in the N64 days, there was an SDK distributed to developers named libultra; LUS is designed to mimic the functionality of libultra on modern hardware. In addition, we are dependant on the source code provided by the OOT decompilation project.
+## Contributing
 
-In order for the game to function, you will require a **legally acquired** ROM for Ocarina of Time. Click [here](https://ship.equipment/) to check the compatibility of your specific rom. Any copyrighted assets are extracted from the ROM and reformatted as a .o2r archive file which the code uses.
+The trunk branch is `development-multiplayer`. Session state, open
+tracker items, and coding conventions live in
+[`CLAUDE.md`](CLAUDE.md), [`Claude/session_state.md`](Claude/session_state.md),
+and [`Claude/task_checklist.md`](Claude/task_checklist.md). File issues
+or pull requests against the [GitHub tracker](https://github.com/St3ph3nBr00ks/Shipwright).
 
-### Graphics Backends
-Currently, there are three rendering APIs supported: DirectX11 (Windows), OpenGL (all platforms), and Metal (MacOS). You can change which API to use in the `Settings` menu of the menubar, which requires a restart.  If you're having an issue with crashing, you can change the API in the `shipofharkinian.json` file by finding the line `gfxbackend:""` and changing the value to `sdl` for OpenGL. DirectX 11 is the default on Windows.
+## Credits and thanks
 
-# Custom Assets
+Flotilla stands entirely on the shoulders of:
 
-Custom assets are packed in `.otr` archive files. To use custom assets, place them in the `mods` folder.
+- **[Ship of Harkinian](https://github.com/HarbourMasters/Shipwright)** —
+  the PC port that makes any of this possible
+- **[libultraship](https://github.com/Kenix3/libultraship)** — the modern
+  runtime backing SoH
+- The **Ocarina of Time decompilation** project
+- HarbourMasters and the SoH community for the Anchor networking primitives
+  Flotilla builds on
+- Everyone in `soh-modding` who has playtested and given feedback
 
-If you're interested in creating and/or packing your own custom asset `.otr` files, check out the following tools:
-* [**retro - OTR generator**](https://github.com/HarbourMasters64/retro)
-* [**fast64 - Blender plugin**](https://github.com/HarbourMasters/fast64)
-
-# Development
-### Building
-
-If you want to manually compile SoH, please consult the [building instructions](docs/BUILDING.md).
-
-### Playtesting
-If you want to playtest a continuous integration build, you can find them at the links below. Keep in mind that these are for playtesting only, and you will likely encounter bugs and possibly crashes. 
-
-* [Windows](https://nightly.link/HarbourMasters/Shipwright/workflows/generate-builds/develop/soh-windows.zip)
-* [macOS](https://nightly.link/HarbourMasters/Shipwright/workflows/generate-builds/develop/soh-mac.zip)
-* [Linux](https://nightly.link/HarbourMasters/Shipwright/workflows/generate-builds/develop/soh-linux.zip)
-
-### Further Reading
-More detailed documentation can be found in the 'docs' directory, including the aforementioned [building instructions](docs/BUILDING.md).
-
-* [Credits](docs/CREDITS.md)
-* [Custom Music](docs/CUSTOM_MUSIC.md)
-* [Controller Mapping](docs/GAME_CONTROLLER_DB.md)
-* [Modding](docs/MODDING.md)
-* [Versioning](docs/VERSIONING.md)
+Ocarina of Time is © Nintendo. Flotilla does not include or distribute
+any copyrighted Nintendo assets; you must supply your own legally
+acquired ROM.
 
 <a href="https://github.com/Kenix3/libultraship/">
   <picture>
