@@ -278,6 +278,20 @@ void BgYdanSp_FloorWebIdle(BgYdanSp* this, PlayState* play) {
     f32 sqrtFallDistance;
     f32 unk;
 
+    // #336 — receive-side sync of the destruction flag. When peer
+    // burns or breaks the web, Flags_SetSwitch(isDestroyedSwitchFlag)
+    // fires on the destroying client and SET_FLAG broadcasts it here.
+    // Vanilla idle only responds to LOCAL triggers; without this gate
+    // the receiving client's web stays visibly intact forever. Route
+    // into BgYdanSp_BurnWeb (burn anim + Actor_Kill on completion).
+    // Safe in single-player: vanilla never sets isDestroyedSwitchFlag
+    // while in Idle (SetSwitch fires only from BurnWeb / FloorWebBreaking,
+    // which both immediately transition out of Idle themselves).
+    if (Flags_GetSwitch(play, this->isDestroyedSwitchFlag)) {
+        BgYdanSp_BurnWeb(this, play);
+        return;
+    }
+
     player = GET_PLAYER(play);
     webPos.x = this->dyna.actor.world.pos.x;
     webPos.y = this->dyna.actor.world.pos.y - 50.0f;
@@ -398,6 +412,16 @@ void BgYdanSp_BurnWallWeb(BgYdanSp* this, PlayState* play) {
 void BgYdanSp_WallWebIdle(BgYdanSp* this, PlayState* play) {
     Player* player;
     Vec3f sp30;
+
+    // #336 — receive-side sync of the destruction flag (isDestroyedSwitchFlag,
+    // set by BurnWeb line 177). Distinct from the existing burnSwitchFlag
+    // check below — burnSwitchFlag is a scripted-burn-enable gate, this is
+    // the "web destroyed by peer" gate. Route into BgYdanSp_BurnWeb (burn
+    // anim + Actor_Kill). Same rationale as the FloorWebIdle sibling.
+    if (Flags_GetSwitch(play, this->isDestroyedSwitchFlag)) {
+        BgYdanSp_BurnWeb(this, play);
+        return;
+    }
 
     player = GET_PLAYER(play);
     if (Flags_GetSwitch(play, this->burnSwitchFlag) || (this->trisCollider.base.acFlags & 2)) {
