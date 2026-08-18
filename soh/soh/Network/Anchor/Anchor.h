@@ -639,6 +639,9 @@ class Anchor : public Network {
     void HandlePacket_ConsumeAdultTradeItem(nlohmann::json payload);
     void HandlePacket_DamagePlayer(nlohmann::json payload);
     void HandlePacket_ShieldBouncePlayer(nlohmann::json payload);
+    // VMP Phase 2 grab-enemy family (#273). Pilot consumer: En_Mb.
+    void HandlePacket_PlayerGrabbed(nlohmann::json payload);
+    void HandlePacket_PlayerReleased(nlohmann::json payload);
     void HandlePacket_DisableAnchor(nlohmann::json payload);
     void HandlePacket_EntranceDiscovered(nlohmann::json payload);
     void HandlePacket_GameComplete(nlohmann::json payload);
@@ -857,6 +860,8 @@ class Anchor : public Network {
     inline static const std::string& MODAL_OFFER_CLAIMED      = PacketTypes::MODAL_OFFER_CLAIMED;
     inline static const std::string& NAV_TEST_DIRECTIVE       = PacketTypes::NAV_TEST_DIRECTIVE;
     inline static const std::string& OCARINA_SFX              = PacketTypes::OCARINA_SFX;
+    inline static const std::string& PLAYER_GRABBED           = PacketTypes::PLAYER_GRABBED;
+    inline static const std::string& PLAYER_RELEASED          = PacketTypes::PLAYER_RELEASED;
     inline static const std::string& PLAYER_SFX               = PacketTypes::PLAYER_SFX;
     inline static const std::string& PLAYER_UPDATE            = PacketTypes::PLAYER_UPDATE;
     inline static const std::string& PROJECTILE_HIT_ENEMY     = PacketTypes::PROJECTILE_HIT_ENEMY;
@@ -2303,6 +2308,19 @@ class Anchor : public Network {
     // world.pos.Y, used to place peer's local particle at equivalent
     // shield height (~30-50u above feet typically).
     void SendPacket_ShieldBouncePlayer(u32 clientId, u16 attackerId, f32 hitOffsetY);
+    // VMP Phase 2 grab-enemy family (#273). Pilot: Moblin (En_Mb).
+    // PLAYER_GRABBED: host fires when its enemy successfully calls
+    // play->grabPlayer against a peer's DummyPlayer. Peer receives
+    // and replicates the vanilla grabPlayer effect on its own Link.
+    // attackerNetId lets peer look up its local replica of the
+    // grabber to set actor.parent for positioning.
+    void SendPacket_PlayerGrabbed(u32 clientId, u32 attackerNetId, u8 damage);
+    // PLAYER_RELEASED: host fires when its enemy clears the grab and
+    // throws the peer. Payload carries the vanilla throw knockback
+    // params so peer's Player_Update reproduces the same arc.
+    void SendPacket_PlayerReleased(u32 clientId, u32 attackerNetId,
+                                   f32 kbSpeed, s16 kbYaw, f32 kbYVel,
+                                   u8 actionVar2);
     void SendPacket_EntranceDiscovered(u16 entranceIndex);
     void SendPacket_GameComplete();
     void SendPacket_GiveItem(u16 modId, s16 getItemId);

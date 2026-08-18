@@ -76,6 +76,14 @@ inline const std::string SHIELD_BOUNCE_PLAYER = "SHIELD_BOUNCE_PLAYER";
 inline const std::string ENEMY_HIT_PLAYER     = "ENEMY_HIT_PLAYER";
 inline const std::string PROJECTILE_HIT_ENEMY = "PROJECTILE_HIT_ENEMY";
 
+// VMP Phase 2 grab-enemy family (#273). Vanilla Mirror Pattern
+// packets for cross-machine sync of grab-and-throw enemies (Moblin,
+// Like Like, Dead Hand arm, Redead, Wallmaster, Floormaster).
+// Walkthrough: Plans/pitfall_28_phase2_vmp_walkthrough_2026-06-15.md.
+// Pilot consumer: En_Mb (Moblin spear + club variants).
+inline const std::string PLAYER_GRABBED       = "PLAYER_GRABBED";
+inline const std::string PLAYER_RELEASED      = "PLAYER_RELEASED";
+
 // Pillar C2 Phase 4 — unified enemy lifecycle packet. Consolidates the
 // four legacy enemy packet types (ENEMY_UPDATE, ENEMY_DEFEATED,
 // ENEMY_SPAWN, ENEMY_RESPAWN) under one wire identifier with phase +

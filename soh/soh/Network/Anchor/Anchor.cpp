@@ -518,6 +518,8 @@ Anchor::GetPacketHandlerRegistry() {
         { DAMAGE_ENEMY,            &Anchor::HandlePacket_DamageEnemy           },
         { DAMAGE_PLAYER,           &Anchor::HandlePacket_DamagePlayer          },
         { SHIELD_BOUNCE_PLAYER,    &Anchor::HandlePacket_ShieldBouncePlayer    },
+        { PLAYER_GRABBED,          &Anchor::HandlePacket_PlayerGrabbed         },
+        { PLAYER_RELEASED,         &Anchor::HandlePacket_PlayerReleased        },
         { ENEMY_HIT_PLAYER,        &Anchor::HandlePacket_EnemyHitPlayer        },
         { PROJECTILE_HIT_ENEMY,    &Anchor::HandlePacket_ProjectileHitEnemy    },
         { TALK_REQUEST,            &Anchor::HandlePacket_TalkRequest           },
