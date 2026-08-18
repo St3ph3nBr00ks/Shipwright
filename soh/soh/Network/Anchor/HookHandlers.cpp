@@ -901,7 +901,20 @@ void Anchor::RegisterHooks() {
                 followerClimbExitCooldown = 10;
             }
         }
+    });
 
+    // #335 — PLAYER_UPDATE broadcast must fire AFTER AnimationContext_Update
+    // flushes the LOADFRAME queue (Pitfall 34). Sending from OnPlayerUpdate
+    // (tail of Player_Update, still inside Actor_UpdateAll) samples the
+    // previous frame's joint data. OnPlayDrawEnd dispatches at
+    // z_play.c:1705 inside Play_Draw, after every actor draw + limb
+    // callback has completed, so the frame's jointTable is fully cooked and
+    // Player_PostLimbDrawGameplay has written back to leftHandPos,
+    // meleeWeaponInfo[], etc. Everything else in the OnPlayerUpdate block
+    // above (justLoadedSave, shouldRefreshActors, skelAnime.skeleton
+    // diagnostic, climbing edge broadcast) stays Update-phase — only the
+    // outbound joint-sample send moves.
+    COND_HOOK(OnPlayDrawEnd, isConnected, [&]() {
         SendPacket_PlayerUpdate();
     });
 
