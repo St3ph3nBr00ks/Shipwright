@@ -385,9 +385,17 @@ bool IsSyncedBossActor(int16_t actorId) {
         // produces silent ENEMY_STATE traffic (receiver discards the payload),
         // which is harmless — it lets us verify admission alone.
         case ACTOR_BOSS_GOMA:    return true;  // Queen Gohma (#67)
-        // Future allowlist additions go here as their trackers land. Each one
-        // should land in the SAME PR as that boss's per-actor sync logic.
-        // case ACTOR_BOSS_DODONGO:    return true;  // #68
+        // Phase 0 admission (#68 2026-08-19). ENEMY_STATE now flows for
+        // King Dodongo: pos + rot + skelAnime + host-authoritative
+        // health via forceNetHealth (HookHandlers.cpp:2803). Boss_Goma-
+        // specific state-machine paths at HookHandlers.cpp:4068+4077
+        // gate on `actor->id == ACTOR_BOSS_GOMA` so they do NOT fire
+        // for Dodongo — the baseline is pose sync only. Per-actionFunc
+        // state sync (BossDodongo_Walk / _Roll / _BlowFire / _Inhale /
+        // _LayDown / _Vulnerable / _GetUp / _Damaged / _Explode /
+        // _DeathCutscene / _IntroCutscene) is Phase 1 follow-up.
+        // See tracker #68 comment 5330859204 for the phased plan.
+        case ACTOR_BOSS_DODONGO: return true;  // King Dodongo (#68) Phase 0
         // case ACTOR_BOSS_VA:         return true;  // #69
         // case ACTOR_BOSS_FD:         return true;  // #70
         // case ACTOR_BOSS_FD2:        return true;  // #70
