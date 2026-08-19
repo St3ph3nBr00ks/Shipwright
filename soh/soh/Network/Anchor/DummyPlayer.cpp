@@ -1667,6 +1667,50 @@ void DummyPlayer_Update(Actor* actor, PlayState* play) {
         Anchor::Instance->SendPacket_DamagePlayer(client.clientId, player->actor.colChkInfo.damageEffect,
                                                   sendDamage, attackerPos,
                                                   kbType, kbSpeed, kbYVel, kbDamage);
+
+        // #273 VMP Phase 2 — grab-family attacker second-effect
+        // broadcast. When a grab-family enemy's AT hits a peer's
+        // DummyPlayer, fire PLAYER_GRABBED alongside DAMAGE_PLAYER so
+        // peer's own Link enters the vanilla grabbed state. Peer's
+        // local replica of the same enemy runs the same state machine
+        // (Moblin's actionState is synced at HookHandlers.cpp:3710 via
+        // EnMb_ApplyNetState), so when the enemy transitions to its
+        // release actionFunc (EnMb_Stunned line 621, or the endCharge
+        // path at line 985), the vanilla release code fires locally on
+        // peer against peer's Link and clears the grab naturally — no
+        // explicit PLAYER_RELEASED send needed as long as actionState
+        // sync is in place for the grab-family actor. Positioning
+        // while grabbed similarly fires on peer's local Moblin replica
+        // (z_en_mb.c:971-980).
+        //
+        // Damage is 0 in PLAYER_GRABBED because DAMAGE_PLAYER above
+        // already handled the -8 HP; the pre-grab-damage branch in
+        // PlayerGrabbed.cpp's receiver is skipped when damage=0.
+        //
+        // Pilot: Moblin (En_Mb, id 0x0022). Future grab-family
+        // additions (Like Like, Dead Hand arm, Redead, Wallmaster,
+        // Floormaster, Morpha) opt in by adding their actor id to the
+        // switch below and adding actionState sync coverage for that
+        // actor if not already present.
+        if (player->cylinder.base.ac != nullptr) {
+            const s16 attackerId = player->cylinder.base.ac->id;
+            bool isGrabFamily = false;
+            switch (attackerId) {
+                case ACTOR_EN_MB: isGrabFamily = true; break;
+                default: break;
+            }
+            if (isGrabFamily) {
+                const EnemyNetId* ext = ObjectExtension::GetInstance().Get<EnemyNetId>(
+                    player->cylinder.base.ac);
+                uint32_t attackerNetId = (ext != nullptr) ? ext->netId : 0;
+                Anchor::Instance->SendPacket_PlayerGrabbed(
+                    client.clientId, attackerNetId, /*damage=*/0);
+                SPDLOG_INFO("[DummyPlayer] SEND PLAYER_GRABBED clientId={} "
+                            "attackerId=0x{:04X} attackerNetId=0x{:X}",
+                            client.clientId, (uint16_t)attackerId, attackerNetId);
+            }
+        }
+
         if (player->actor.colChkInfo.damageEffect == DUMMY_PLAYER_HIT_RESPONSE_STUN) {
             Actor_SetColorFilter(&player->actor, 0, 0xFF, 0, 24);
         } else {
