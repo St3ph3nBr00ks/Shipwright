@@ -44,6 +44,31 @@ void Anchor::HandlePacket_AllClientState(nlohmann::json payload) {
     // add new clients
     for (auto& client : newClients) {
         if (client.self) {
+            // Diagnostic: warn when the server-assigned clientId differs
+            // from what we proposed. Fires on identity-collision reassign
+            // (relay's server.go:244-253 findOrCreateClient loop picks a
+            // fresh nextClientId when the proposed ID is already online).
+            //
+            // The typical "identity collision" root cause: two SoH
+            // instances share the same shipofharkinian.json (P2 config
+            // cloned from P1 during 2-instance test-env setup). Both
+            // propose the same persisted `gRemote.Anchor.LastClientId`.
+            // Server SHOULD reassign one via nextClientId.Add(1); if the
+            // WARN below never fires but both clients end up with the
+            // same ownClientId, the relay's reassignment path is broken
+            // (race or persisted-room-client overwrite at server.go
+            // :259-268). See the 2026-08-23 flickering-UI investigation.
+            //
+            // Suppression: only fire when the pre-existing ownClientId
+            // was nonzero (fresh first-connect legitimately transitions
+            // 0 → N, which is not an anomaly).
+            if (ownClientId != 0 && ownClientId != client.clientId) {
+                SPDLOG_WARN("[Anchor] server reassigned clientId: proposed={} "
+                            "assigned={} — likely a stale/duplicate persisted "
+                            "gRemote.Anchor.LastClientId (config cloned across "
+                            "instances?). Persisting the new value.",
+                            ownClientId, client.clientId);
+            }
             ownClientId = client.clientId;
             CVarSetInteger(CVAR_REMOTE_ANCHOR("LastClientId"), ownClientId);
             Ship::Context::GetRawInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
