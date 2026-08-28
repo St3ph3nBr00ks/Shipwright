@@ -163,19 +163,26 @@ void TryConsumePendingSubTextAdvance(const char* siteTag) {
 
 // True when the local client is in a cutscene text state — the
 // vanilla textbox is loaded and displayed as part of an ongoing
-// cutscene. Used by the host to detect textbox-open edges and start
-// the hard deadline timer.
+// forced-dialog context that all players are pulled into. Used by
+// the host to detect textbox-open edges and start the hard deadline
+// timer.
 //
 // Predicates:
-//   - Play_InCsMode: cutscene active (csCtx.state != IDLE OR
-//     player linkAction non-null).
+//   - Anchor_IsForcedDialogContext (GH #339, 2026-08-28):
+//     csCtx.state != IDLE OR (csAction != 0 && cv.haltActorsDuringCsAction).
+//     Catches scripted cutscenes AND halted-actors NPC dialog (Owl,
+//     Impa speeches, Dark Link). Predecessor gate was Play_InCsMode,
+//     which fired for ANY talk because Player_SetupTalk unconditionally
+//     sets PLAYER_STATE1_IN_CUTSCENE — arming vote-skip for voluntary
+//     NPC dialog (Hintnut, business scrub) it shouldn't fire for.
+//     See AnchorMessageBridge.h for the composite-classifier rationale.
 //   - msgCtx.msgMode != MSGMODE_NONE: message subsystem has an
 //     active textbox loaded / displaying.
 //   - msgCtx.textId != 0: sanity check that textId is a valid
 //     dialogue reference.
 bool IsHostInCutsceneTextState() {
     if (gPlayState == nullptr) return false;
-    if (!Play_InCsMode(gPlayState)) return false;
+    if (!Anchor_IsForcedDialogContext()) return false;
     if (gPlayState->msgCtx.msgMode == MSGMODE_NONE) return false;
     if (gPlayState->msgCtx.textId == 0) return false;
     return true;

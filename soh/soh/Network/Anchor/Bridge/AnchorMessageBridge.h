@@ -145,3 +145,41 @@ uint8_t GetTextboxEndType();
 uint8_t GetChoiceNumOptions();
 
 }  // namespace AnchorMessageBridge
+
+// ---- Forced-dialog classifier (GH #339, 2026-08-28) -----------------
+//
+// Returns non-zero when the current textbox is part of a "forced"
+// dialog context that all players are pulled into together — a signal
+// the multiplayer vote-skip / auto-advance system should engage.
+// Returns zero for voluntary player-initiated NPC dialog (Hintnut,
+// business scrub, Kokiri kid, shopkeepers, hint stones, etc.) where
+// each player reads locally at their own pace.
+//
+// Two runtime signals combine to define "forced":
+//   1. play->csCtx.state != CS_STATE_IDLE
+//      — a scripted cutscene command sequence is running. Covers sage
+//        medallion awards, boss intros, Zelda courtyard, story trigs.
+//   2. player->csAction != 0 && player->cv.haltActorsDuringCsAction
+//      — Player_SetCsActionWithHaltedActors was invoked (z_actor.c:1489).
+//        Covers Kaepora Gaebora (En_Owl), Impa speeches, Dark Link
+//        (En_Torch2 line 621), story-driven NPCs that halt the world.
+//        Two-part gate: csAction != 0 excludes the union alias
+//        (cv.slidingDoorBgCamIndex) from firing during sliding-door
+//        room transitions.
+//
+// Replaces the earlier Play_InCsMode-based gate at
+// CutsceneTextAdvance.cpp:178 + z_message_PAL.c:198/241, which fired
+// for ANY talk because Player_SetupTalk unconditionally sets
+// PLAYER_STATE1_IN_CUTSCENE — arming vote-skip for every NPC dialog
+// including voluntary ones.
+//
+// See GH #339 for the observed hint-nut re-open cycle and design
+// tradeoff between narrow (csCtx.state only) and composite (both
+// signals). Composite classifier preserves vote-skip for Owl / Impa /
+// sage class while excluding the routine NPC surface.
+//
+// Declared at file scope (outside AnchorMessageBridge namespace) so
+// C++ callers see it unqualified — same pattern as
+// Anchor_ShouldAdvanceCutsceneTextLocal (Bridge/CutsceneBridge.cpp)
+// and Anchor_ShouldAutoAdvanceNpcDialog (this TU's .cpp).
+extern "C" int Anchor_IsForcedDialogContext(void);

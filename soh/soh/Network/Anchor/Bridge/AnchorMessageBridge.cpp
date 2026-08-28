@@ -227,3 +227,26 @@ extern "C" int Anchor_ShouldAutoAdvanceNpcDialog(unsigned currentTextId) {
     }
     return 0;
 }
+
+// -------- Forced-dialog classifier (GH #339) --------
+//
+// See header for the design rationale + why-chain. Two OR'd signals:
+//   (1) csCtx.state != CS_STATE_IDLE  — pure cutscene commands
+//   (2) csAction != 0 && cv.haltActorsDuringCsAction  — halted-actors
+//       cutscene mode (Player_SetCsActionWithHaltedActors, z_actor.c:1489)
+//
+// The two-part check on signal (2) is load-bearing: `cv` is a union
+// with `slidingDoorBgCamIndex`, which is written during sliding-door
+// room transitions with a non-zero BgCamIndex value. Gating on
+// csAction != 0 filters that alias out — sliding doors don't set
+// csAction, so a stray non-zero cv value there can't false-positive.
+extern "C" int Anchor_IsForcedDialogContext(void) {
+    if (gPlayState == nullptr) return 0;
+    if (gPlayState->csCtx.state != CS_STATE_IDLE) return 1;
+    Player* player = GET_PLAYER(gPlayState);
+    if (player != nullptr && player->csAction != 0 &&
+        player->cv.haltActorsDuringCsAction) {
+        return 1;
+    }
+    return 0;
+}

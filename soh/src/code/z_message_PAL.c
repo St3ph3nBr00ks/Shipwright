@@ -180,6 +180,15 @@ extern int Anchor_ShouldAutoAdvanceNpcDialog(unsigned currentTextId);
 // into a single point. See AnchorMessageBridge.h for the design.
 extern void Anchor_OnMessageBufPosAdvanced(unsigned newMsgBufPos, unsigned currentTextId);
 
+// GH #339 (2026-08-28) — composite forced-dialog classifier replacing
+// the earlier `play->csCtx.state != CS_STATE_IDLE` gate. Returns 1 for
+// scripted cutscenes AND halted-actors NPC dialog (Owl, Impa, sage
+// medallion, Dark Link); returns 0 for voluntary NPC dialog like
+// Hintnut / business scrub / shopkeeper. See AnchorMessageBridge.h
+// for the design rationale. Zero-argument extern; reads gPlayState
+// internally.
+extern int Anchor_IsForcedDialogContext(void);
+
 u8 Message_ShouldAdvance(PlayState* play) {
     Input* input = &play->state.input[0];
 
@@ -190,12 +199,15 @@ u8 Message_ShouldAdvance(PlayState* play) {
                       CHECK_BTN_ALL(input->press.button, BTN_CUP);
 
     // Anchor multiplayer #191 — only take the voting-skip path during
-    // cutscene-driven textboxes. Vanilla NPC dialog (csCtx.state ==
-    // CS_STATE_IDLE) keeps per-client advance — no observable lag for
-    // routine NPC interactions, and the voting-skip mechanic only
-    // matters for multi-page scripted sequences where clients drift
-    // out of sync.
-    if (play->csCtx.state != CS_STATE_IDLE) {
+    // FORCED dialog contexts (scripted cutscenes + halted-actors NPC
+    // like Owl / Impa / sage medallion / Dark Link). Voluntary NPC
+    // dialog (Hintnut, business scrub, shopkeeper, hint stones) keeps
+    // per-client advance — vote-skip UI would spuriously arm and the
+    // hard-deadline broadcast would cycle the textbox unexpectedly
+    // (GH #339). See Anchor_IsForcedDialogContext (AnchorMessageBridge.h)
+    // for the composite classifier that replaces the earlier
+    // csCtx.state-only gate.
+    if (Anchor_IsForcedDialogContext()) {
         if (localPress) {
             Audio_PlaySoundGeneral(NA_SE_SY_MESSAGE_PASS, &gSfxDefaultPos, 4, &gSfxDefaultFreqAndVolScale,
                                    &gSfxDefaultFreqAndVolScale, &gSfxDefaultReverb);
@@ -229,16 +241,20 @@ u8 Message_ShouldAdvanceSilent(PlayState* play) {
         CHECK_BTN_ALL(input->press.button, BTN_A) || isB_Held || CHECK_BTN_ALL(input->press.button, BTN_CUP);
 
     // Anchor multiplayer #294 — route through the vote-skip bridge
-    // during cutscene mode. Message_ShouldAdvance (the sibling above)
-    // already does this; the Silent variant was bypassing it, which
-    // let the first Deku Tree intro textboxes and other
+    // during forced-dialog contexts. Message_ShouldAdvance (the sibling
+    // above) already does this; the Silent variant was bypassing it,
+    // which let the first Deku Tree intro textboxes and other
     // TEXTBOX_ENDTYPE_HAS_NEXT-chained cutscene text advance without
     // ever hitting the vote-skip system. No SFX played here (Silent's
     // caller at MSGMODE_TEXT_DONE picks the correct SFX after this
     // returns true — NA_SE_SY_MESSAGE_PASS for HAS_NEXT chains,
     // NA_SE_SY_DECIDE for close). Visual feedback for the local
     // press is provided by the CoopModalHud's dot fill.
-    if (play->csCtx.state != CS_STATE_IDLE) {
+    //
+    // GH #339 (2026-08-28) — swapped csCtx.state gate for the
+    // composite Anchor_IsForcedDialogContext to preserve vote-skip
+    // for Owl / Impa / sage class while excluding voluntary NPCs.
+    if (Anchor_IsForcedDialogContext()) {
         return Anchor_ShouldAdvanceCutsceneTextLocal(localPress ? 1 : 0,
                                                      (unsigned)play->msgCtx.textId)
                    ? 1
