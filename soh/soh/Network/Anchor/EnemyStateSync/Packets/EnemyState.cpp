@@ -415,6 +415,13 @@ std::unordered_map<uint32_t, EnemyUpdateLastSent> sLastSentByNetId;
 // host populates the singleton + effective host's replay path
 // consults it via a sync packet). Documented in §3.4 of the plan.
 //
+// GH #338 layer B — netIds we've already fired a one-shot health
+// reconciliation DAMAGE_ENEMY for this scene visit. Prevents flooding
+// host with reconcile packets at ENEMY_STATE broadcast rate (~20 pps)
+// when peer's local health legitimately trails host after an authority
+// handoff. Cleared alongside sLastSentByNetId in Anchor_ClearEnemyUpdateCache.
+std::unordered_set<uint32_t> sHealthReconciledByNetId;
+
 // Cleared by Anchor_ClearEnemyUpdateCache (scene transition) alongside
 // sLastSentByNetId so the tracking state has the same lifetime as the
 // delta-filter cache. Per-netId entries are also removed when the
@@ -950,6 +957,8 @@ void UpdateLastSentCache(uint32_t netId,
 void Anchor_ClearEnemyUpdateCache() {
     sLastSentByNetId.clear();
     sNotifiedSpawnByNetId.clear();
+    // GH #338 — reconciliation attempts are scoped to a scene visit.
+    sHealthReconciledByNetId.clear();
 }
 
 // Public — drop a single netId from the dedup cache so the next
@@ -967,6 +976,7 @@ void Anchor_ClearEnemyUpdateCache() {
 void Anchor_ClearEnemyUpdateCacheForNetId(uint32_t netId) {
     sLastSentByNetId.erase(netId);
     sNotifiedSpawnByNetId.erase(netId);
+    sHealthReconciledByNetId.erase(netId);
 }
 
 // ===========================================================================
@@ -2069,6 +2079,59 @@ void Anchor::HandlePacket_EnemyUpdate(nlohmann::json payload) {
             // its own outgoing/echoed ENEMY_STATE.
             if (health <= 0 && !::SceneAuthority::IsMyCurrentRoomHost()) {
                 ext->networkDriveDying = true;
+            }
+        } else {
+            // GH #338 layer B — one-shot reconciliation when host's
+            // broadcast health is HIGHER than our local. Root cause of
+            // the reported repro (2026-08-27): peer was the sole
+            // occupant of a room (peer = room host by lowest-id
+            // election), peer damaged an enemy locally. Peer's
+            // SendPacket_DamageEnemy targets the room host = self →
+            // short-circuits at DamageEnemy.cpp:182 → no wire event
+            // ever fires. When another client walks in with a lower
+            // clientId, room-host authority flips; the new host's
+            // fresh actor broadcasts full health; the multi-hit guard
+            // above rejects the apply; the two clients desync
+            // permanently for that scene visit.
+            //
+            // Reconcile by sending DAMAGE_ENEMY(delta) back to the
+            // broadcaster. Host's DrainPendingSyncDamage applies via
+            // the vanilla damage machinery on next ShouldActorUpdate;
+            // host's next broadcast carries the corrected value; the
+            // gate above accepts it (equal, not greater) and both
+            // clients converge on peer's actual view.
+            //
+            // Rate-limit: one reconciliation per (netId, scene visit).
+            // ENEMY_STATE broadcasts at ~20 pps; without the limit
+            // the reconciliation loop would drown host in packets.
+            // Cleared on scene transition via Anchor_ClearEnemyUpdateCache.
+            //
+            // Bosses are `forceNetHealth`-exempt (handled above); this
+            // branch only fires for non-boss synced actors.
+            //
+            // Safety: only fire when sender != self (self-broadcast
+            // echo wouldn't be a real authority mismatch), sender is
+            // valid, and delta actually represents damage the peer's
+            // local track has already applied (delta > 0 by design of
+            // this branch). Applies to the CURRENT room host per the
+            // routing in SendPacket_DamageEnemy.
+            const uint32_t senderId = payload.value("clientId", (uint32_t)0);
+            const bool     alreadyReconciled =
+                sHealthReconciledByNetId.count(netId) != 0;
+            if (!alreadyReconciled && senderId != 0 &&
+                Anchor::Instance != nullptr &&
+                senderId != Anchor::Instance->ownClientId &&
+                actor->colChkInfo.health > 0 && health > 0) {
+                const s16 delta = (s16)health - (s16)actor->colChkInfo.health;
+                if (delta > 0 && delta <= 0xFF) {
+                    sHealthReconciledByNetId.insert(netId);
+                    Anchor::Instance->SendPacket_DamageEnemy(
+                        netId, (u8)delta, /*damageEffect*/ 0, /*atHitEffect*/ 0);
+                    SPDLOG_INFO("[EnemyState] Health reconcile netId={} — host broadcast={} "
+                                "local={} — sending DAMAGE_ENEMY(delta={}) to sender={} (one-shot)",
+                                netId, (int)health, (int)actor->colChkInfo.health,
+                                (int)delta, senderId);
+                }
             }
         }
         actor->scale = scale;

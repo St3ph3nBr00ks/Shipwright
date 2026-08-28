@@ -1558,6 +1558,34 @@ void Anchor::RegisterHooks() {
             return;
         }
 
+        // GH #338 — drain buffered damage that arrived before the actor
+        // spawned locally on host (see DamageEnemy.cpp:229 layer A).
+        // Transfer accumulated damage into ext->pendingSyncDamage so the
+        // existing DrainPendingSyncDamage machinery applies it on the
+        // first ShouldActorUpdate tick — BEFORE the actor's first
+        // ENEMY_STATE broadcast. Prevents the "host walks in, enemy
+        // shows full health for peers" desync class.
+        //
+        // No-op for the common case (no pending damage). Non-host
+        // clients never buffer (see DamageEnemy.cpp `IsEffectiveHost`
+        // gate), so this only ever fires host-side.
+        if (EnemyStateSync::HostBookkeeping::Instance().HasPendingDamage(netId)) {
+            EnemyStateSync::PendingDamage pd =
+                EnemyStateSync::HostBookkeeping::Instance().ConsumePendingDamage(netId);
+            EnemyNetId* extMut = const_cast<EnemyNetId*>(
+                ObjectExtension::GetInstance().Get<EnemyNetId>(actor));
+            if (extMut != nullptr && pd.damage > 0) {
+                const uint32_t sum = (uint32_t)extMut->pendingSyncDamage + (uint32_t)pd.damage;
+                extMut->pendingSyncDamage =
+                    sum > 0xFFu ? (uint8_t)0xFFu : (uint8_t)sum;
+                if (pd.damageEffect != 0) extMut->pendingSyncDamageEffect = pd.damageEffect;
+                if (pd.atHitEffect  != 0) extMut->pendingSyncAtHitEffect  = pd.atHitEffect;
+                SPDLOG_INFO("[EnemySpawn] Drained pending damage from ledger netId={} damage={} "
+                            "→ ext->pendingSyncDamage={} (drains on next ShouldActorUpdate)",
+                            netId, (int)pd.damage, (int)extMut->pendingSyncDamage);
+            }
+        }
+
         // Scene-host deferred broadcast: send ENEMY_SPAWN for dynamic
         // actors now that the netId extension is in place.
         //

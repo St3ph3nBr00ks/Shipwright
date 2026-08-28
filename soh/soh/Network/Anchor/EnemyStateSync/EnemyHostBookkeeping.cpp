@@ -176,6 +176,71 @@ void HostBookkeeping::ClearAllDefeatBroadcasts() {
 }
 
 // ---------------------------------------------------------------------
+// Pending damage (GH #338)
+// ---------------------------------------------------------------------
+
+void HostBookkeeping::RecordPendingDamage(uint32_t netId, uint8_t damage,
+                                          uint8_t damageEffect, uint8_t atHitEffect) {
+    if (damage == 0) return;
+    PendingDamage& entry = mPendingDamage[netId];
+    // Saturating add — mirrors EnemyNetId::pendingSyncDamage semantics.
+    const uint32_t sum = (uint32_t)entry.damage + (uint32_t)damage;
+    entry.damage       = sum > 0xFFu ? 0xFFu : (uint8_t)sum;
+    // Last-write-wins for the flavour bytes (parity with the on-ext
+    // pendingSyncDamage machinery in DamageEnemy.cpp).
+    entry.damageEffect = damageEffect;
+    entry.atHitEffect  = atHitEffect;
+}
+
+bool HostBookkeeping::HasPendingDamage(uint32_t netId) const {
+    return mPendingDamage.count(netId) != 0;
+}
+
+PendingDamage HostBookkeeping::ConsumePendingDamage(uint32_t netId) {
+    auto it = mPendingDamage.find(netId);
+    if (it == mPendingDamage.end()) {
+        return PendingDamage{};
+    }
+    PendingDamage value = it->second;
+    mPendingDamage.erase(it);
+    return value;
+}
+
+void HostBookkeeping::ClearPendingDamage(uint32_t netId) {
+    mPendingDamage.erase(netId);
+}
+
+void HostBookkeeping::ClearStalePendingDamageFromOtherScenes(uint16_t currentScene) {
+    // Mask 0x7FFF drops the Pillar B timeline bit; same encoding
+    // gotcha as ClearStalePendingKillsFromOtherScenes.
+    const uint16_t maskedCurrent = currentScene & 0x7FFF;
+    for (auto it = mPendingDamage.begin(); it != mPendingDamage.end();) {
+        const uint16_t entryScene = (uint16_t)((it->first >> 16) & 0x7FFF);
+        if (entryScene != maskedCurrent) {
+            it = mPendingDamage.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void HostBookkeeping::ClearPendingDamageForScene(int16_t sceneNum, uint8_t timeline) {
+    const uint16_t maskedScene = (uint16_t)(sceneNum & 0x7FFF);
+    const bool     anyTimeline = (timeline == 0xFF);
+    for (auto it = mPendingDamage.begin(); it != mPendingDamage.end();) {
+        const uint16_t entryScene    = (uint16_t)((it->first >> 16) & 0x7FFF);
+        const uint8_t  entryTimeline = (uint8_t)((it->first >> 31) & 0x1);
+        const bool     sceneMatches  = (entryScene == maskedScene);
+        const bool     tlMatches     = anyTimeline || (entryTimeline == timeline);
+        if (sceneMatches && tlMatches) {
+            it = mPendingDamage.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
 // Damagers
 // ---------------------------------------------------------------------
 
@@ -226,6 +291,7 @@ void HostBookkeeping::Reset() {
     mSceneDeaths.clear();
     mDefeatBroadcasts.clear();
     mDamagers.clear();
+    mPendingDamage.clear();
     mLiveSpawnsByScene.clear();
 }
 

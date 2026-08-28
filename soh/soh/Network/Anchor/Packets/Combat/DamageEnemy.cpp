@@ -227,6 +227,38 @@ void Anchor::HandlePacket_DamageEnemy(nlohmann::json payload) {
     // ITEMACTION / MISC instances) doesn't silently drop.
     Actor* actor = FindActorByNetId(gPlayState, netId);
     if (actor == nullptr) {
+        // GH #338 layer A — actor not resident in host's actor list yet.
+        // Common when host is in a different room of the same scene and
+        // the damage arrives just before host walks in. Pre-fix behavior:
+        // silent drop; enemy would appear at full health on host's first
+        // ENEMY_STATE broadcast after entering the room.
+        //
+        // Buffer into HostBookkeeping. Consumed at OnActorSpawn — the
+        // buffered damage is transferred to ext->pendingSyncDamage and
+        // drained by the existing DrainPendingSyncDamage path on the
+        // first ShouldActorUpdate tick, BEFORE the actor's first
+        // ENEMY_STATE broadcast.
+        //
+        // Guarded by ValidateSameScene above, so we only ever buffer
+        // damage relevant to the scene we're currently in — cross-scene
+        // packets have already been dropped.
+        //
+        // Attribution: still record damager so downstream kill
+        // attribution works (Q I Tier 2).
+        uint8_t damageEffect = payload.contains("damageEffect")
+                                   ? (uint8_t)payload["damageEffect"].get<int>()
+                                   : 0;
+        uint8_t atHitEffect  = payload.contains("atHitEffect")
+                                   ? (uint8_t)payload["atHitEffect"].get<int>()
+                                   : 0;
+        EnemyStateSync::HostBookkeeping::Instance().RecordPendingDamage(
+            netId, damage, damageEffect, atHitEffect);
+        uint32_t senderId2 = payload.value("clientId", (uint32_t)0);
+        if (senderId2 != 0) {
+            EnemyStateSync::HostBookkeeping::Instance().RecordDamager(netId, senderId2);
+        }
+        SPDLOG_INFO("[DamageEnemy] Buffered pending damage netId={} damage={} — actor not loaded",
+                    netId, (int)damage);
         return;
     }
     // Skip dead actors — actor->update == NULL after Actor_Kill.

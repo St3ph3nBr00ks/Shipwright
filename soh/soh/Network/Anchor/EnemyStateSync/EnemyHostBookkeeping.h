@@ -54,6 +54,24 @@ struct LiveSpawnRecord {
     int      directorGroupId;
 };
 
+// Buffered damage that arrived on the host before the target actor
+// was resident in host's actor list. Applied when the actor spawns.
+//
+// GH #338 (2026-08-27): fixes "peer damages an enemy while host is
+// out of the room → host walks in → enemy resets to full health".
+// Root cause was HandlePacket_DamageEnemy dropping the packet at the
+// actor==nullptr branch with no persistence, so host's first
+// ENEMY_STATE broadcast after entering the room carried fresh vanilla
+// health, which the peer receive-gate rejected (multi-hit guard).
+//
+// Damage is accumulated saturating-add; damageEffect / atHitEffect are
+// last-write-wins (same semantic as EnemyNetId::pendingSyncDamage).
+struct PendingDamage {
+    uint8_t damage       = 0;
+    uint8_t damageEffect = 0;
+    uint8_t atHitEffect  = 0;
+};
+
 class HostBookkeeping {
 public:
     static HostBookkeeping& Instance();
@@ -110,6 +128,29 @@ public:
     void ReleaseDefeatBroadcast(uint32_t netId);
     void ClearAllDefeatBroadcasts();  // on scene re-enter (OnSceneSpawnActors)
 
+    // ----- pendingDamage (GH #338) -----
+    // Damage that arrived while the target actor wasn't loaded on host.
+    // Accumulates saturating-add; drained at OnActorSpawn into the
+    // actor's ext->pendingSyncDamage, which the existing
+    // DrainPendingSyncDamage path applies on next ShouldActorUpdate —
+    // before host's first ENEMY_STATE broadcast for the actor.
+    void RecordPendingDamage(uint32_t netId, uint8_t damage,
+                             uint8_t damageEffect, uint8_t atHitEffect);
+    bool HasPendingDamage(uint32_t netId) const;
+    // Returns the accumulated damage triple and clears the entry.
+    // Returns {0, 0, 0} when the netId has no entry.
+    PendingDamage ConsumePendingDamage(uint32_t netId);
+    void          ClearPendingDamage(uint32_t netId);
+    // Drops entries whose encoded scene (bits 30-16 of netId, low 15
+    // bits of sceneNum) does NOT match `currentScene`. Mirrors
+    // ClearStalePendingKillsFromOtherScenes semantics — the same
+    // bit-encoding gotcha applies (mask 0x7FFF to drop timeline bit).
+    void ClearStalePendingDamageFromOtherScenes(uint16_t currentScene);
+    // Drops entries whose encoded (sceneNum, timeline) MATCHES the
+    // arguments. Sibling to ClearPendingKillsForScene. Pass
+    // `timeline = 0xFF` to match any timeline.
+    void ClearPendingDamageForScene(int16_t sceneNum, uint8_t timeline);
+
     // ----- lastDamagerByNetId -----
     void     RecordDamager(uint32_t netId, uint32_t clientId);
     uint32_t LookupDamager(uint32_t netId) const;  // 0 if none
@@ -139,6 +180,7 @@ private:
     std::unordered_map<int16_t, std::unordered_set<uint32_t>> mSceneDeaths;
     std::unordered_set<uint32_t>                              mDefeatBroadcasts;
     std::unordered_map<uint32_t /*netId*/, uint32_t /*clientId*/> mDamagers;
+    std::unordered_map<uint32_t /*netId*/, PendingDamage>     mPendingDamage;
     std::unordered_map<int16_t, std::unordered_map<uint32_t, LiveSpawnRecord>>
         mLiveSpawnsByScene;
 };
